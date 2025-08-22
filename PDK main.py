@@ -1,204 +1,238 @@
+import tkinter as tk
+from tkinter import ttk, filedialog
 import numpy as np
-import matplotlib.pyplot as plt
 from scipy.interpolate import interp1d
-import time
-import gdspy # The library for creating GDSII files
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-# --- Phase 1: Foundational Physics & Process Simulation ---
+# --- 1. PDK CORE: FABRICATION PROCESS SIMULATION ---
 
-def generate_mock_luts():
+def generate_luts_for_process(process_id):
     """
-    Generates mock lookup tables (LUTs) for both phase and a fabrication parameter.
-    In a real PDK, this comes from extensive, validated simulations.
-
-    Returns:
-        tuple: A tuple containing dictionaries for the phase and dose LUTs.
+    Generates mock lookup tables (LUTs) based on the selected fabrication process.
+    Each process has different capabilities for feature size and phase coverage.
     """
-    # LUT 1: Pillar Diameter to Phase Shift
-    pillar_diameters_nm = np.linspace(60, 200, 100)
-    phase_shift_rad = np.mod(
-        (2 * np.pi * (1 - np.cos(np.pi * (pillar_diameters_nm - 60) / 140))), 
-        2 * np.pi
-    )
-    phase_lut = {'diameters_nm': pillar_diameters_nm, 'phases_rad': phase_shift_rad}
+    diameters_nm, phase_shift_rad, fab_parameter = None, None, None
+    fab_param_name = "E-Beam Dose (a.u.)"
 
-    # LUT 2: Pillar Diameter to E-Beam Dose (Manufacturing Parameter)
-    # This simulates a correction for proximity effects where smaller, denser
-    # features might need a slightly higher dose to resolve properly.
-    # The dose is a relative value here.
-    base_dose = 100
-    dose_correction = 1 + 0.15 * np.exp(-(pillar_diameters_nm - 60) / 50)
-    ebeam_dose = base_dose * dose_correction
-    dose_lut = {'diameters_nm': pillar_diameters_nm, 'dose': ebeam_dose}
-    
-    return phase_lut, dose_lut
+    if process_id == 'Process A: High-Res E-Beam':
+        diameters_nm = np.linspace(50, 200, 100)
+        phase_shift_rad = np.mod(2.1 * np.pi * (1 - np.cos(np.pi * (diameters_nm - 50) / 150)), 2 * np.pi)
+        fab_parameter = 100 * (1 + 0.15 * np.exp(-(diameters_nm - 50) / 40))
+    elif process_id == 'Process B: Standard E-Beam':
+        diameters_nm = np.linspace(80, 220, 80)
+        phase_shift_rad = np.mod(1.85 * np.pi * (1 - np.cos(np.pi * (diameters_nm - 80) / 140)), 2 * np.pi)
+        fab_parameter = 120 * (1 + 0.10 * np.exp(-(diameters_nm - 80) / 60))
+    elif process_id == 'Process C: DUV Photolithography':
+        diameters_nm = np.linspace(110, 250, 60)
+        phase_shift_rad = np.mod(1.6 * np.pi * np.sin(np.pi * (diameters_nm - 110) / 280), 2 * np.pi)
+        fab_parameter = 1500 + 5 * (diameters_nm - 110)
+        fab_param_name = "Etch Time (ms)"
 
-def create_inverse_interpolators(phase_lut, dose_lut):
-    """
-    Creates interpolator functions for the "inverse design" step.
+    return {
+        'phase_lut': {'diameters_nm': diameters_nm, 'phases_rad': phase_shift_rad},
+        'fab_lut': {'diameters_nm': diameters_nm, 'param_values': fab_parameter, 'param_name': fab_param_name},
+    }
 
-    Args:
-        phase_lut (dict): Dictionary containing diameter and phase data.
-        dose_lut (dict): Dictionary containing diameter and dose data.
+# --- 2. PDK CORE: INVERSE DESIGN & LAYOUT GENERATION ---
 
-    Returns:
-        tuple: A tuple of two functions: (phase_to_diameter, diameter_to_dose)
-    """
-    # Interpolator 1: Find diameter for a given phase
+def create_inverse_interpolators(phase_lut, fab_lut):
+    """Creates interpolator functions to find diameter from phase and fab param from diameter."""
+    # Sort by phase to handle non-monotonic behavior for interpolation
     sort_indices = np.argsort(phase_lut['phases_rad'])
-    sorted_phases = phase_lut['phases_rad'][sort_indices]
-    sorted_diameters = phase_lut['diameters_nm'][sort_indices]
-    
-    phase_to_diameter_func = interp1d(
-        sorted_phases, 
-        sorted_diameters, 
-        bounds_error=False, 
-        fill_value=(sorted_diameters[0], sorted_diameters[-1])
-    )
-    
-    # Interpolator 2: Find the required e-beam dose for a given diameter
-    diameter_to_dose_func = interp1d(
-        dose_lut['diameters_nm'],
-        dose_lut['dose'],
+    phase_to_dia = interp1d(
+        phase_lut['phases_rad'][sort_indices],
+        phase_lut['diameters_nm'][sort_indices],
         bounds_error=False,
-        fill_value=(dose_lut['dose'][0], dose_lut['dose'][-1])
+        fill_value=(phase_lut['diameters_nm'][sort_indices][0], phase_lut['diameters_nm'][sort_indices][-1])
     )
+    dia_to_fab = interp1d(
+        fab_lut['diameters_nm'],
+        fab_lut['param_values'],
+        bounds_error=False,
+        fill_value=(fab_lut['param_values'][0], fab_lut['param_values'][-1])
+    )
+    return phase_to_dia, dia_to_fab
 
-    return phase_to_diameter_func, diameter_to_dose_func
-
-# --- Phase 2: Optical Function Definition ---
-
-def calculate_phase_profile(lens_type, **kwargs):
-    """
-    Calculates the ideal phase profile for a specified optical component.
-    This modular function can be expanded with more lens types.
-
-    Args:
-        lens_type (str): The type of lens ('focusing', 'axicon', etc.).
-        **kwargs: Keyword arguments specific to the lens type.
-
-    Returns:
-        tuple: (x_coords_mm, y_coords_mm, phase_profile_rad)
-    """
-    diameter_mm = kwargs['diameter_mm']
-    grid_resolution = kwargs['grid_resolution']
-    wavelength_um = kwargs['wavelength_um']
+def calculate_phase_profile(config, grid_resolution):
+    """Calculates the ideal hyperbolic phase profile for a focusing lens."""
+    radius_um = (config['lens_diameter'] / 2.0) * 1000
+    f_um = config['focal_length'] * 1000
+    wavelength_um = config['wavelength']
     
-    radius_mm = diameter_mm / 2.0
-    xy_lin = np.linspace(-radius_mm * 1000, radius_mm * 1000, grid_resolution)
+    xy_lin = np.linspace(-radius_um, radius_um, grid_resolution)
     x_coords, y_coords = np.meshgrid(xy_lin, xy_lin)
     r = np.sqrt(x_coords**2 + y_coords**2)
-
-    if lens_type == 'focusing':
-        f = kwargs['focal_length_mm'] * 1000
-        phase_profile = (2 * np.pi / wavelength_um) * (np.sqrt(r**2 + f**2) - f)
-    # --- ADD NEW LENS TYPES HERE ---
-    # elif lens_type == 'axicon':
-    #     beta = kwargs['beta_degrees']
-    #     phase_profile = -(2 * np.pi / wavelength_um) * np.tan(np.deg2rad(beta)) * r
-    else:
-        raise ValueError(f"Lens type '{lens_type}' is not supported.")
-
-    wrapped_phase_profile = np.mod(phase_profile, 2 * np.pi)
-    return x_coords / 1000, y_coords / 1000, wrapped_phase_profile
-
-# --- Phase 3: Layout Generation & Manufacturing Interface ---
-
-def generate_gdsii_file(filename, x_coords_mm, y_coords_mm, pillar_diameters_nm, pillar_doses):
-    """
-    Creates a GDSII file from the generated layout data.
-    This is the manufacturing interface.
-
-    Args:
-        filename (str): The name of the output GDSII file.
-        x_coords_mm (ndarray): 2D array of x-coordinates.
-        y_coords_mm (ndarray): 2D array of y-coordinates.
-        pillar_diameters_nm (ndarray): 2D array of pillar diameters.
-        pillar_doses (ndarray): 2D array of e-beam doses.
-    """
-    print(f"Step 4: Generating GDSII file '{filename}'...")
     
-    # GDSII library setup
-    gdsii_lib = gdspy.GdsLibrary()
-    main_cell = gdsii_lib.new_cell('METALENS')
+    phase = (2 * np.pi / wavelength_um) * (np.sqrt(r**2 + f_um**2) - f_um)
+    wrapped_phase = np.mod(phase, 2 * np.pi)
     
-    # GDSII layer and datatype for e-beam dose
-    EBEAM_LAYER = 1
-    # GDSII allows storing integer data with polygons (e.g., for dose)
-    EBEAM_DATATYPE_DOSE = 1 
+    return x_coords, y_coords, wrapped_phase
 
-    # Iterate through every meta-atom in our design grid
-    for i in range(pillar_diameters_nm.shape[0]):
-        for j in range(pillar_diameters_nm.shape[1]):
-            center_x_um = x_coords_mm[i, j] * 1000
-            center_y_um = y_coords_mm[i, j] * 1000
-            radius_um = (pillar_diameters_nm[i, j] / 2.0) / 1000
-            dose_value = int(pillar_doses[i, j])
+# --- 3. GUI APPLICATION CLASS ---
 
-            # Create a circle polygon for the pillar
-            pillar = gdspy.Round(
-                (center_x_um, center_y_um), 
-                radius_um, 
-                layer=EBEAM_LAYER,
-                # Here we attach the dose information directly to the polygon
-                datatype=EBEAM_DATATYPE_DOSE 
-            )
-            # The actual dose value is stored in a separate text-based file
-            # for many e-beam systems, but this shows how it can be linked.
+class PDK_App:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Interactive Metalens PDK")
+        self.root.configure(bg='#111827') # bg-gray-900
+
+        self.GRID_RESOLUTION = 150 # Lower for better GUI performance
+        self.current_layout_data = {}
+
+        # --- Create GUI Layout ---
+        controls_frame = tk.Frame(root, bg='#1f2937', padx=15, pady=15) # bg-gray-800
+        controls_frame.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
+
+        plots_frame = tk.Frame(root, bg='#111827')
+        plots_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # --- Controls ---
+        ttk.Label(controls_frame, text="Design Controls", font=("Inter", 16, "bold"), background='#1f2937', foreground='white').pack(pady=10)
+        
+        self.controls = {}
+        options = {
+            "Wavelength (λ)": {"values": [("1550 nm (Telecom)", 1.55), ("1064 nm (YAG)", 1.064), ("905 nm (LiDAR)", 0.905)], "default": 1.55},
+            "Focal Length (f)": {"values": [("5 mm", 5.0), ("10 mm", 10.0), ("20 mm", 20.0)], "default": 10.0},
+            "Lens Diameter": {"values": [("1 mm", 1.0), ("2 mm", 2.0), ("3 mm", 3.0)], "default": 2.0},
+            "Pinhole Aperture": {"values": [("No Aperture", 9999.0), ("0.5 mm", 0.5), ("1.0 mm", 1.0)], "default": 9999.0},
+            "Fabrication Process": {"values": [("Process A: High-Res E-Beam",), ("Process B: Standard E-Beam",), ("Process C: DUV Photolithography",)], "default": "Process A: High-Res E-Beam"},
+        }
+
+        style = ttk.Style()
+        style.configure('TLabel', background='#1f2937', foreground='lightgray', font=('Inter', 10))
+        style.configure('TMenubutton', background='#374151', foreground='white', font=('Inter', 10), borderwidth=1)
+
+        for label, opts in options.items():
+            ttk.Label(controls_frame, text=label).pack(anchor='w', pady=(10, 2))
+            var = tk.StringVar(value=opts['default'])
             
-            main_cell.add(pillar)
+            display_values = [v[0] for v in opts['values']]
+            
+            if len(opts['values'][0]) == 1:
+                option_map = {v[0]: v[0] for v in opts['values']}
+                var.set(display_values[0])
+            else:
+                option_map = {v[0]: v[1] for v in opts['values']}
+                default_display = next(k for k, v in option_map.items() if v == opts['default'])
+                var.set(default_display)
 
-    # Save the GDSII file
-    gdsii_lib.write_gds(filename)
-    print("Step 4: GDSII generation complete.")
+            self.controls[label] = {'var': var, 'map': option_map}
+            
+            dropdown = ttk.OptionMenu(controls_frame, var, var.get(), *display_values, command=lambda _: self.update_plots())
+            dropdown.pack(fill=tk.X)
 
+        # --- Action Button ---
+        generate_btn = ttk.Button(controls_frame, text="Generate Layout CSV", command=self.generate_csv_file)
+        generate_btn.pack(pady=20, fill=tk.X)
+        self.status_label = ttk.Label(controls_frame, text="")
+        self.status_label.pack()
+
+        # --- Plots ---
+        plt.style.use('dark_background')
+        self.fig = plt.figure(figsize=(10, 10), facecolor='#111827')
+        self.canvas = FigureCanvasTkAgg(self.fig, master=plots_frame)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        self.update_plots()
+
+    def update_plots(self):
+        """Main function to re-calculate and re-draw everything."""
+        # --- FIX: Clear the entire figure to prevent stacking artifacts ---
+        self.fig.clear()
+        
+        # 1. Get config from UI
+        config = {
+            'wavelength': self.controls['Wavelength (λ)']['map'][self.controls['Wavelength (λ)']['var'].get()],
+            'focal_length': self.controls['Focal Length (f)']['map'][self.controls['Focal Length (f)']['var'].get()],
+            'lens_diameter': self.controls['Lens Diameter']['map'][self.controls['Lens Diameter']['var'].get()],
+            'pinhole_diameter': self.controls['Pinhole Aperture']['map'][self.controls['Pinhole Aperture']['var'].get()],
+            'fab_process': self.controls['Fabrication Process']['var'].get()
+        }
+
+        # 2. Generate LUTs and interpolators
+        luts = generate_luts_for_process(config['fab_process'])
+        phase_to_dia, dia_to_fab = create_inverse_interpolators(luts['phase_lut'], luts['fab_lut'])
+
+        # 3. Calculate phase and layout
+        x, y, phase = calculate_phase_profile(config, self.GRID_RESOLUTION)
+        diameters = phase_to_dia(phase)
+        fab_params = dia_to_fab(diameters)
+
+        # Apply pinhole
+        r = np.sqrt(x**2 + y**2)
+        pinhole_radius_um = (config['pinhole_diameter'] / 2.0) * 1000
+        mask = r > pinhole_radius_um
+        diameters[mask] = 0
+        fab_params[mask] = 0
+        
+        self.current_layout_data = {'x': x, 'y': y, 'diameters': diameters, 'fab_params': fab_params, 'fab_lut': luts['fab_lut']}
+
+        # 4. Draw plots on a fresh set of axes
+        ((ax1, ax2), (ax3, ax4)) = self.fig.subplots(2, 2)
+        self.draw_lut_plot(ax1, luts['phase_lut'])
+        self.draw_image_plot(ax2, x, y, phase, "2. Ideal Phase Profile", 'hsv')
+        self.draw_image_plot(ax3, x, y, diameters, "3. Generated Nanopillar Layout", 'viridis')
+        self.draw_image_plot(ax4, x, y, fab_params, f"4. {luts['fab_lut']['param_name']}", 'plasma')
+        
+        self.fig.tight_layout(pad=3.0)
+        self.canvas.draw()
+
+    def draw_lut_plot(self, ax, phase_lut):
+        ax.plot(phase_lut['diameters_nm'], phase_lut['phases_rad'], 'o-', color='#3b82f6')
+        ax.set_title("1. Meta-Atom LUT")
+        ax.set_xlabel("Pillar Diameter (nm)")
+        ax.set_ylabel("Phase Shift (rad)")
+        ax.set_yticks([0, np.pi/2, np.pi, 3*np.pi/2, 2*np.pi])
+        ax.set_yticklabels(['0', 'π/2', 'π', '3π/2', '2π'])
+        ax.grid(True, linestyle='--', alpha=0.5)
+
+    def draw_image_plot(self, ax, x, y, data, title, cmap):
+        valid_data = data[data > 0]
+        vmin = valid_data.min() if len(valid_data) > 0 else 0
+        vmax = valid_data.max() if len(valid_data) > 0 else 1
+        
+        im = ax.imshow(data, extent=[x.min()/1000, x.max()/1000, y.min()/1000, y.max()/1000],
+                       cmap=cmap, origin='lower', vmin=vmin, vmax=vmax)
+        ax.set_title(title)
+        ax.set_xlabel("X (mm)")
+        ax.set_ylabel("Y (mm)")
+        self.fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    def generate_csv_file(self):
+        """Saves the current layout data to a CSV file."""
+        data = self.current_layout_data
+        if not data:
+            self.status_label.config(text="No data to save.")
+            return
+
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            title="Save Metalens Layout"
+        )
+        if not filepath:
+            return
+
+        self.status_label.config(text="Generating CSV...")
+        self.root.update_idletasks()
+
+        header = f"x_um,y_um,diameter_nm,{data['fab_lut']['param_name'].replace(' ', '_')}"
+        
+        x_flat = data['x'].flatten()
+        y_flat = data['y'].flatten()
+        d_flat = data['diameters'].flatten()
+        f_flat = data['fab_params'].flatten()
+
+        mask = d_flat > 0
+        rows = np.stack([x_flat[mask], y_flat[mask], d_flat[mask], f_flat[mask]], axis=1)
+        
+        np.savetxt(filepath, rows, delimiter=',', header=header, comments='', fmt='%.3f')
+
+        self.status_label.config(text=f"Saved to {filepath.split('/')[-1]}")
+        self.root.after(4000, lambda: self.status_label.config(text=""))
 
 if __name__ == '__main__':
-    # --- High-Level Designer Inputs ---
-    LENS_DIAMETER_MM = 1.0
-    WAVELENGTH_UM = 1.55
-    GRID_RESOLUTION = 250 
-
-    # P-Cell parameters for a focusing lens
-    pcell_params = {
-        'lens_type': 'focusing',
-        'focal_length_mm': 5.0,
-        'diameter_mm': LENS_DIAMETER_MM,
-        'grid_resolution': GRID_RESOLUTION,
-        'wavelength_um': WAVELENGTH_UM
-    }
-    
-    print("--- Metalens PDK Prototype v2 ---")
-    start_time = time.time()
-
-    # 1. Load physics and process data
-    print("Step 1: Generating mock LUTs...")
-    phase_lut, dose_lut = generate_mock_luts()
-    phase_to_dia, dia_to_dose = create_inverse_interpolators(phase_lut, dose_lut)
-    print("Step 1: Complete.")
-
-    # 2. Calculate the ideal optical function
-    print(f"Step 2: Calculating phase profile for a '{pcell_params['lens_type']}' lens...")
-    x_coords, y_coords, ideal_phase = calculate_phase_profile(**pcell_params)
-    print("Step 2: Complete.")
-
-    # 3. Map optical function to physical layout
-    print("Step 3: Mapping phase to physical diameters and doses...")
-    final_diameters = phase_to_dia(ideal_phase)
-    final_doses = dia_to_dose(final_diameters)
-    print("Step 3: Complete.")
-    
-    # 4. Generate the manufacturing file (GDSII)
-    generate_gdsii_file(
-        'metalens_layout.gds', 
-        x_coords, 
-        y_coords, 
-        final_diameters, 
-        final_doses
-    )
-    
-    end_time = time.time()
-    print(f"\nFull PDK flow for {GRID_RESOLUTION**2:,} meta-atoms took {end_time - start_time:.4f} seconds.")
-
-    # You can now open 'metalens_layout.gds' in a GDSII viewer like KLayout.
-
+    root = tk.Tk()
+    app = PDK_App(root)
+    root.mainloop()

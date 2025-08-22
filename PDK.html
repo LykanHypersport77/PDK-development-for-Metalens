@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Metalens PDK</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .control-label {
+            @apply text-sm font-medium text-gray-400 mb-1;
+        }
+        .control-select {
+            @apply w-full bg-gray-700 border border-gray-600 text-white text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 p-2.5;
+        }
+        /* Fix for dropdown option visibility */
+        .control-select option {
+            background: #374151; /* bg-gray-700 */
+            color: white;
+        }
+        .plot-canvas {
+            @apply w-full h-auto rounded-lg bg-gray-800 border border-gray-700;
+        }
+        .plot-title {
+            @apply text-center text-sm font-semibold text-gray-300 mt-2 mb-4;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white">
+
+    <div class="container mx-auto p-4 lg:p-6">
+        <!-- Header -->
+        <header class="text-center mb-6">
+            <h1 class="text-3xl lg:text-4xl font-bold text-white">Interactive Metalens PDK</h1>
+            <p class="text-md text-gray-400 mt-2">Select design parameters to generate and visualize a metalens layout in real-time.</p>
+        </header>
+
+        <!-- Main Content: Controls + Visualization -->
+        <div class="flex flex-col lg:flex-row gap-6">
+
+            <!-- Left Panel: Controls -->
+            <div class="w-full lg:w-1/4 bg-gray-800 p-5 rounded-xl border border-gray-700 shadow-lg">
+                <h2 class="text-xl font-semibold mb-4 border-b border-gray-600 pb-2">Design Controls</h2>
+                
+                <div class="space-y-4">
+                    <!-- Wavelength -->
+                    <div>
+                        <label for="wavelength" class="control-label">Wavelength (λ)</label>
+                        <select id="wavelength" class="control-select">
+                            <option value="1.55">1550 nm (Telecom)</option>
+                            <option value="1.064">1064 nm (YAG)</option>
+                            <option value="0.905">905 nm (LiDAR)</option>
+                        </select>
+                    </div>
+
+                    <!-- Focal Length -->
+                    <div>
+                        <label for="focalLength" class="control-label">Focal Length (f)</label>
+                        <select id="focalLength" class="control-select">
+                            <option value="5">5 mm</option>
+                            <option value="10" selected>10 mm</option>
+                            <option value="20">20 mm</option>
+                        </select>
+                    </div>
+
+                    <!-- Lens Diameter -->
+                    <div>
+                        <label for="lensDiameter" class="control-label">Lens Diameter</label>
+                        <select id="lensDiameter" class="control-select">
+                            <option value="1">1 mm</option>
+                            <option value="2" selected>2 mm</option>
+                            <option value="3">3 mm</option>
+                        </select>
+                    </div>
+
+                    <!-- Pinhole Diameter -->
+                    <div>
+                        <label for="pinholeDiameter" class="control-label">Pinhole Aperture</label>
+                        <select id="pinholeDiameter" class="control-select">
+                            <option value="9999">No Aperture</option>
+                            <option value="0.5">0.5 mm</option>
+                            <option value="1.0">1.0 mm</option>
+                        </select>
+                    </div>
+
+                    <!-- Fabrication Process -->
+                    <div>
+                        <label for="fabProcess" class="control-label">Fabrication Process</label>
+                        <select id="fabProcess" class="control-select">
+                            <option value="fabA" selected>Process A: High-Res E-Beam</option>
+                            <option value="fabB">Process B: Standard E-Beam</option>
+                            <option value="fabC">Process C: DUV Photolithography</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Action Button -->
+                <div class="mt-6 pt-4 border-t border-gray-600">
+                    <button id="generateCsv" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition duration-300">
+                        Generate Layout CSV
+                    </button>
+                    <p id="statusMessage" class="text-xs text-center text-green-400 mt-2 h-4"></p>
+                </div>
+            </div>
+
+            <!-- Right Panel: Visualizations -->
+            <div class="w-full lg:w-3/4 grid grid-cols-1 md:grid-cols-2 gap-6">
+                
+                <div class="bg-gray-800 p-4 rounded-xl border border-gray-700">
+                    <canvas id="lutCanvas" class="plot-canvas" width="500" height="500"></canvas>
+                    <h3 class="plot-title">1. Meta-Atom Lookup Table (LUT)</h3>
+                </div>
+                
+                <div class="bg-gray-800 p-4 rounded-xl border border-gray-700">
+                    <canvas id="phaseCanvas" class="plot-canvas" width="500" height="500"></canvas>
+                    <h3 class="plot-title">2. Ideal Phase Profile</h3>
+                </div>
+
+                <div class="bg-gray-800 p-4 rounded-xl border border-gray-700">
+                    <canvas id="layoutCanvas" class="plot-canvas" width="500" height="500"></canvas>
+                    <h3 class="plot-title">3. Generated Nanopillar Layout</h3>
+                </div>
+
+                <div class="bg-gray-800 p-4 rounded-xl border border-gray-700">
+                    <canvas id="fabCanvas" class="plot-canvas" width="500" height="500"></canvas>
+                    <h3 class="plot-title">4. Fabrication Parameter Map</h3>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- DOM Element References ---
+        const controls = {
+            wavelength: document.getElementById('wavelength'),
+            focalLength: document.getElementById('focalLength'),
+            lensDiameter: document.getElementById('lensDiameter'),
+            pinholeDiameter: document.getElementById('pinholeDiameter'),
+            fabProcess: document.getElementById('fabProcess'),
+        };
+        const canvases = {
+            lut: document.getElementById('lutCanvas'),
+            phase: document.getElementById('phaseCanvas'),
+            layout: document.getElementById('layoutCanvas'),
+            fab: document.getElementById('fabCanvas'),
+        };
+        const generateBtn = document.getElementById('generateCsv');
+        const statusMsg = document.getElementById('statusMessage');
+
+        const GRID_RESOLUTION = 200; // Lower for performance in browser
+        let currentLayoutData = {}; // Global variable to store the latest layout data
+
+        // --- 1. PDK CORE: FABRICATION PROCESS SIMULATION ---
+        
+        function generateLutsForProcess(processId) {
+            let diameters_nm, phase_shift_rad, fab_parameter;
+            let fabParamName = "E-Beam Dose (a.u.)";
+
+            switch (processId) {
+                case 'fabA': // High-Res E-Beam: Wide range, full 2pi coverage
+                    diameters_nm = np.linspace(50, 200, 100);
+                    phase_shift_rad = np.mod(2.1 * Math.PI * (1 - np.cos(np.pi * (diameters_nm - 50) / 150)), 2 * Math.PI);
+                    fab_parameter = 100 * (1 + 0.15 * np.exp(-(diameters_nm - 50) / 40));
+                    break;
+                case 'fabB': // Standard E-Beam: Medium range, slightly less phase coverage
+                    diameters_nm = np.linspace(80, 220, 80);
+                    phase_shift_rad = np.mod(1.85 * Math.PI * (1 - np.cos(np.pi * (diameters_nm - 80) / 140)), 2 * Math.PI);
+                    fab_parameter = 120 * (1 + 0.10 * np.exp(-(diameters_nm - 80) / 60));
+                    break;
+                case 'fabC': // DUV Photolithography: Tighter constraints, limited phase
+                    diameters_nm = np.linspace(110, 250, 60);
+                    phase_shift_rad = np.mod(1.6 * Math.PI * np.sin(np.pi * (diameters_nm - 110) / 280), 2 * Math.PI);
+                    fab_parameter = 1500 + 5 * (diameters_nm - 110); // Represents etch time in ms
+                    fabParamName = "Etch Time (ms)";
+                    break;
+            }
+            return {
+                phase_lut: { diameters_nm, phases_rad: phase_shift_rad },
+                fab_lut: { diameters_nm, param_values: fab_parameter, param_name: fabParamName },
+            };
+        }
+
+        // --- 2. PDK CORE: INVERSE DESIGN & LAYOUT GENERATION ---
+
+        const np = {
+            linspace: (start, stop, num) => Array.from({ length: num }, (_, i) => start + (stop - start) * i / (num - 1)),
+            mod: (a, n) => ((a % n) + n) % n,
+            exp: Math.exp,
+            sin: Math.sin,
+            cos: Math.cos,
+        };
+
+        function createInverseInterpolators(phase_lut, fab_lut) {
+            const phase_to_dia = (phase) => {
+                const phases = phase_lut.phases_rad;
+                const diams = phase_lut.diameters_nm;
+                let idx = phases.findIndex(p => p > phase) - 1;
+                if (idx < 0) idx = 0;
+                if (idx >= phases.length - 1) idx = phases.length - 2;
+                const p1 = phases[idx], p2 = phases[idx+1];
+                const d1 = diams[idx], d2 = diams[idx+1];
+                if (p2 === p1) return d1;
+                return d1 + (d2 - d1) * (phase - p1) / (p2 - p1);
+            };
+            const dia_to_fab = (diam) => {
+                const diams = fab_lut.diameters_nm;
+                const params = fab_lut.param_values;
+                let idx = diams.findIndex(d => d > diam) - 1;
+                if (idx < 0) idx = 0;
+                if (idx >= diams.length - 1) idx = diams.length - 2;
+                const d1 = diams[idx], d2 = diams[idx+1];
+                const f1 = params[idx], f2 = params[idx+1];
+                if (d2 === d1) return f1;
+                return f1 + (f2 - f1) * (diam - d1) / (d2 - d1);
+            };
+            return { phase_to_dia, dia_to_fab };
+        }
+
+        function calculatePhaseProfile(config) {
+            const { lensDiameter, focalLength, wavelength } = config;
+            const radius_um = (lensDiameter / 2.0) * 1000;
+            const f_um = focalLength * 1000;
+            const xy_lin = np.linspace(-radius_um, radius_um, GRID_RESOLUTION);
+            const phase_profile = Array(GRID_RESOLUTION).fill(0).map(() => Array(GRID_RESOLUTION));
+            const x_coords = Array(GRID_RESOLUTION).fill(0).map(() => Array(GRID_RESOLUTION));
+            const y_coords = Array(GRID_RESOLUTION).fill(0).map(() => Array(GRID_RESOLUTION));
+            for (let i = 0; i < GRID_RESOLUTION; i++) {
+                for (let j = 0; j < GRID_RESOLUTION; j++) {
+                    const x = xy_lin[j];
+                    const y = xy_lin[i];
+                    const r = Math.sqrt(x*x + y*y);
+                    const phase = (2 * Math.PI / wavelength) * (Math.sqrt(r*r + f_um*f_um) - f_um);
+                    phase_profile[i][j] = np.mod(phase, 2 * Math.PI);
+                    x_coords[i][j] = x;
+                    y_coords[i][j] = y;
+                }
+            }
+            return { x_coords, y_coords, phase_profile };
+        }
+
+        // --- 3. VISUALIZATION ENGINE ---
+
+        function drawLutPlot(canvas, phase_lut) {
+            const ctx = canvas.getContext('2d');
+            const { width, height } = canvas;
+            ctx.clearRect(0, 0, width, height);
+            ctx.fillStyle = '#1f2937';
+            ctx.fillRect(0, 0, width, height);
+            const padding = 60;
+            ctx.strokeStyle = '#4b5563';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(padding, padding);
+            ctx.lineTo(padding, height - padding);
+            ctx.lineTo(width - padding, height - padding);
+            ctx.stroke();
+            const xMin = Math.min(...phase_lut.diameters_nm);
+            const xMax = Math.max(...phase_lut.diameters_nm);
+            const yMax = 2 * Math.PI;
+            ctx.strokeStyle = '#3b82f6';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            for (let i = 0; i < phase_lut.diameters_nm.length; i++) {
+                const x = padding + (phase_lut.diameters_nm[i] - xMin) / (xMax - xMin) * (width - 2 * padding);
+                const y = height - padding - (phase_lut.phases_rad[i]) / yMax * (height - 2 * padding);
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+            ctx.fillStyle = '#9ca3af';
+            ctx.font = '12px Inter';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(xMin.toFixed(0), padding, height - padding + 20);
+            ctx.fillText(xMax.toFixed(0), width - padding, height - padding + 20);
+            ctx.fillText('Pillar Diameter (nm)', width / 2, height - 15);
+            ctx.textAlign = 'right';
+            ['0', 'π/2', 'π', '3π/2', '2π'].forEach((label, i) => {
+                const y = height - padding - (i * (Math.PI / 2)) / yMax * (height - 2 * padding);
+                ctx.fillText(label, padding - 10, y);
+            });
+            ctx.save();
+            ctx.translate(20, height / 2);
+            ctx.rotate(-Math.PI / 2);
+            ctx.textAlign = 'center';
+            ctx.fillText('Phase Shift (rad)', 0, 0);
+            ctx.restore();
+        }
+
+        function drawImagePlot(canvas, data, colorMap) {
+            const ctx = canvas.getContext('2d');
+            const { width, height } = canvas;
+            const res = data.length;
+            const imageData = ctx.createImageData(width, height);
+            const flatData = data.flat().filter(v => v > 0);
+            const minVal = flatData.length > 0 ? Math.min(...flatData) : 0;
+            const maxVal = flatData.length > 0 ? Math.max(...flatData) : 0;
+            for (let i = 0; i < res; i++) {
+                for (let j = 0; j < res; j++) {
+                    const val = data[i][j];
+                    const normalized = (val > 0 && maxVal > minVal) ? (val - minVal) / (maxVal - minVal) : 0;
+                    const color = (val > 0) ? colorMap(normalized) : [15, 23, 42]; // bg-slate-900
+                    const x_start = Math.floor(j * width / res);
+                    const y_start = Math.floor(i * height / res);
+                    const x_end = Math.floor((j + 1) * width / res);
+                    const y_end = Math.floor((i + 1) * height / res);
+                    for (let y = y_start; y < y_end; y++) {
+                        for (let x = x_start; x < x_end; x++) {
+                            const index = (y * width + x) * 4;
+                            imageData.data.set(color, index);
+                            imageData.data[index + 3] = 255;
+                        }
+                    }
+                }
+            }
+            ctx.putImageData(imageData, 0, 0);
+            const cbarWidth = 20;
+            const cbarPadding = 10;
+            for (let i = 0; i < height; i++) {
+                const color = colorMap(i / height);
+                ctx.fillStyle = `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+                ctx.fillRect(width - cbarWidth - cbarPadding, height - i - cbarPadding, cbarWidth, 1);
+            }
+            ctx.strokeStyle = '#9ca3af';
+            ctx.strokeRect(width - cbarWidth - cbarPadding, cbarPadding, cbarWidth, height - 2 * cbarPadding);
+            ctx.fillStyle = '#d1d5db';
+            ctx.font = '12px Inter';
+            ctx.textAlign = 'right';
+            ctx.fillText(maxVal.toFixed(1), width - cbarWidth - cbarPadding - 5, cbarPadding + 5);
+            ctx.fillText(minVal.toFixed(1), width - cbarWidth - cbarPadding - 5, height - cbarPadding);
+        }
+
+        const hsvToRgb = (h, s, v) => { let r, g, b; let i = Math.floor(h * 6); let f = h * 6 - i; let p = v * (1 - s); let q = v * (1 - f * s); let t = v * (1 - (1 - f) * s); switch (i % 6) { case 0: r = v, g = t, b = p; break; case 1: r = q, g = v, b = p; break; case 2: r = p, g = v, b = t; break; case 3: r = p, g = q, b = v; break; case 4: r = t, g = p, b = v; break; case 5: r = v, g = p, b = q; break; } return [r * 255, g * 255, b * 255]; };
+        const viridis = (t) => { const c = [[0.267, 0.0048, 0.329], [0.229, 0.322, 0.545], [0.127, 0.566, 0.550], [0.369, 0.788, 0.382], [0.993, 0.906, 0.143]]; const i = Math.floor(t * (c.length - 1)); const f = t * (c.length - 1) - i; if (i >= c.length - 1) return c[c.length-1].map(x=>x*255); return c[i].map((v, j) => (v + (c[i+1][j] - v) * f) * 255); };
+
+        // --- 4. MAIN APPLICATION LOGIC ---
+
+        function update() {
+            const config = { wavelength: parseFloat(controls.wavelength.value), focalLength: parseFloat(controls.focalLength.value), lensDiameter: parseFloat(controls.lensDiameter.value), pinholeDiameter: parseFloat(controls.pinholeDiameter.value), fabProcess: controls.fabProcess.value };
+            const { phase_lut, fab_lut } = generateLutsForProcess(config.fabProcess);
+            const { phase_to_dia, dia_to_fab } = createInverseInterpolators(phase_lut, fab_lut);
+            let { x_coords, y_coords, phase_profile } = calculatePhaseProfile(config);
+            const layout_diams = Array(GRID_RESOLUTION).fill(0).map(() => Array(GRID_RESOLUTION));
+            const fab_params = Array(GRID_RESOLUTION).fill(0).map(() => Array(GRID_RESOLUTION));
+            const pinhole_radius_um = (config.pinholeDiameter / 2.0) * 1000;
+            for (let i = 0; i < GRID_RESOLUTION; i++) {
+                for (let j = 0; j < GRID_RESOLUTION; j++) {
+                    const r = Math.sqrt(x_coords[i][j]**2 + y_coords[i][j]**2);
+                    if (r > pinhole_radius_um) {
+                        layout_diams[i][j] = 0; fab_params[i][j] = 0;
+                    } else {
+                        const diameter = phase_to_dia(phase_profile[i][j]);
+                        layout_diams[i][j] = diameter;
+                        fab_params[i][j] = dia_to_fab(diameter);
+                    }
+                }
+            }
+            
+            // Store data for CSV generation
+            currentLayoutData = { x_coords, y_coords, layout_diams, fab_params, fab_lut };
+
+            // Update visualizations
+            drawLutPlot(canvases.lut, phase_lut);
+            drawImagePlot(canvases.phase, phase_profile, (t) => hsvToRgb(t, 1, 1));
+            drawImagePlot(canvases.layout, layout_diams, viridis);
+            drawImagePlot(canvases.fab, fab_params, (t) => viridis(1-t));
+        }
+
+        function generateCsvFile() {
+            const { x_coords, y_coords, layout_diams, fab_params, fab_lut } = currentLayoutData;
+            if (!x_coords) {
+                statusMsg.textContent = 'No data to generate.';
+                return;
+            }
+            statusMsg.textContent = 'Generating CSV...';
+            
+            let csvContent = `x_um,y_um,diameter_nm,${fab_lut.param_name.replace(/\s/g, '_')}\n`;
+            for (let i = 0; i < GRID_RESOLUTION; i++) {
+                for (let j = 0; j < GRID_RESOLUTION; j++) {
+                    if (layout_diams[i][j] > 0) { // Only include pillars inside the aperture
+                        const row = [
+                            x_coords[i][j].toFixed(3),
+                            y_coords[i][j].toFixed(3),
+                            layout_diams[i][j].toFixed(3),
+                            fab_params[i][j].toFixed(3)
+                        ].join(',');
+                        csvContent += row + '\n';
+                    }
+                }
+            }
+
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement("a");
+            const url = URL.createObjectURL(blob);
+            link.setAttribute("href", url);
+            link.setAttribute("download", "metalens_layout.csv");
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+
+            statusMsg.textContent = 'Layout CSV downloaded!';
+            setTimeout(() => { statusMsg.textContent = ''; }, 4000);
+        }
+
+        // --- Event Listeners ---
+        Object.values(controls).forEach(control => control.addEventListener('change', update));
+        generateBtn.addEventListener('click', generateCsvFile);
+        window.addEventListener('load', update);
+
+    </script>
+</body>
+</html>
