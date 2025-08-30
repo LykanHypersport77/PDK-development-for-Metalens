@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.patches import Circle
 from matplotlib.collections import PatchCollection
+from matplotlib.figure import Figure
 
 # ----------------------------- Mock Materials / Resins -----------------------------
 MATERIALS = {
@@ -345,13 +346,6 @@ class PDK_App:
             self.status.set("Generate images first.")
             return
 
-        import numpy as np
-        import tkinter as tk
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-        from matplotlib.figure import Figure
-        from matplotlib.patches import Circle
-        from matplotlib.collections import PatchCollection
-
         top = tk.Toplevel(self.root)
         top.title("Interactive Lens Layout — Vector Pillars (μm units; view-culling)")
 
@@ -450,7 +444,7 @@ class PDK_App:
         canvas.mpl_connect('button_release_event', schedule_redraw)
 
         # Initial zoom: start tight so draw cost is tiny (~10% of radius)
-        f = 0.10
+        f = 0.15
         ax.set_xlim(-R * f, R * f)
         ax.set_ylim(-R * f, R * f)
 
