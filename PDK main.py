@@ -6,7 +6,6 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.patches import Circle
 from matplotlib.collections import PatchCollection
-from matplotlib.figure import Figure
 
 # ----------------------------- Mock Materials / Resins -----------------------------
 MATERIALS = {
@@ -24,14 +23,13 @@ RESINS = {
 }
 
 # ----------------------------- Generic (process-free) LUTs -----------------------------
-
 def generate_generic_luts(substrate, resin, wavelength_um):
     """Process-agnostic LUTs; slight scaling with n_eff to stay realistic-ish."""
     neff = RESINS[resin]["n_eff"]
     diameters_nm = np.linspace(110, 250, 80)
     amp = 1.5 + 0.4 * (neff - 1.6)  # around ~1.5..1.8
     phases = np.mod(amp * np.pi * np.sin(np.pi * (diameters_nm - 110) / 280), 2 * np.pi)
-    fab_param = 1000 + 4 * (diameters_nm - 110)  # generic fabrication proxy
+    fab_param = 1000 + 4 * (diameters_nm - 110)  # generic fabrication proxy (a.u.)
     fab_name = "Fabrication Proxy (a.u.)"
     return {
         "phase_lut": {"diameters_nm": diameters_nm, "phases_rad": phases},
@@ -64,6 +62,8 @@ def calculate_phase_profile(config, grid_resolution):
     return x, y, np.mod(phase, 2 * np.pi)
 
 # ----------------------------- App -----------------------------
+LAYOUT_KEYS = ["wavelength_um","substrate","resin","lens_diameter","working_distance","perf_pct"]
+
 class PDK_App:
     def __init__(self, root):
         self.root = root
@@ -76,6 +76,7 @@ class PDK_App:
 
         self.config = {}
         self.current_layout_data = {}
+        self._layout_key = None  # for cache invalidation
 
         # Left / right panes
         self.left = tk.Frame(root, bg="#1f2937", padx=14, pady=14)
@@ -105,7 +106,6 @@ class PDK_App:
             font=("Inter", 11, "bold"), relief="raised", command=self.update_plots, state=tk.DISABLED
         ); self.btn_generate.pack(fill=tk.X, pady=(2, 6))
 
-        # NEW: vector (pillar-circle) viewer like KLayout
         self.btn_viewer = tk.Button(
             self.output_container, text="Open Interactive Lens Layout (vector)",
             bg="#9333ea", fg="white", activebackground="#7e22ce", activeforeground="white",
@@ -150,10 +150,59 @@ class PDK_App:
         self._build_step_1()
         self._update_output_buttons_state()
 
+    # ---------- cache helpers ----------
+    def _layout_requirements_met(self):
+        return set(LAYOUT_KEYS) <= self.config.keys()
+
+    def _current_cache_key(self):
+        return tuple(self.config.get(k) for k in LAYOUT_KEYS)
+
+    def _compute_layout(self):
+        """Compute layout arrays without drawing plots; store in self.current_layout_data."""
+        if not self._layout_requirements_met():
+            self.warn.set("Complete steps 1–6 first.")
+            return False
+
+        grid_res = int(np.clip(self.config["lens_diameter"] * self.PX_PER_MM, self.MIN_RES, self.MAX_RES))
+        if grid_res % 2 == 0:
+            grid_res += 1
+
+        luts = generate_generic_luts(self.config["substrate"], self.config["resin"], self.config["wavelength_um"])
+        phase_to_dia, dia_to_fab = create_inverse_interpolators(luts["phase_lut"], luts["fab_lut"])
+
+        x, y, phase = calculate_phase_profile(self.config, grid_res)
+        diameters = phase_to_dia(phase)
+        fab_params = dia_to_fab(diameters)
+
+        r = np.sqrt(x**2 + y**2)
+        lens_radius_um = (self.config["lens_diameter"] / 2) * 1000.0
+        active = r <= lens_radius_um
+        diameters = np.where(active, diameters, 0.0)
+        fab_params = np.where(active, fab_params, 0.0)
+
+        self.current_layout_data = {
+            "x": x, "y": y, "phase": phase,
+            "diameters": diameters, "fab_params": fab_params,
+            "phase_lut": luts["phase_lut"], "fab_lut": luts["fab_lut"]
+        }
+        self._layout_key = self._current_cache_key()
+        return True
+
+    def _ensure_layout(self):
+        """Ensure layout exists and is up-to-date; compute if missing/stale."""
+        if not self._layout_requirements_met():
+            self.warn.set("Complete steps 1–6 first.")
+            return False
+        if not self.current_layout_data or self._layout_key != self._current_cache_key():
+            ok = self._compute_layout()
+            if ok:
+                self.status.set("Layout computed.")
+            return ok
+        return True
+
     # ---------- utilities ----------
     def _update_output_buttons_state(self):
-        req = {"wavelength_um","substrate","resin","lens_diameter","working_distance","perf_pct"}
-        ready = req <= self.config.keys()
+        ready = self._layout_requirements_met()
         state = tk.NORMAL if ready else tk.DISABLED
         self.btn_generate.config(state=state)
         self.btn_export.config(state=state)
@@ -179,6 +228,9 @@ class PDK_App:
             for k in klist:
                 self.config.pop(k, None)
         self._update_output_buttons_state()
+        # invalidate cache
+        self.current_layout_data = {}
+        self._layout_key = None
 
     def _add_step_frame(self, label_text):
         frame = tk.Frame(self.steps_container, bg="#1f2937")
@@ -279,42 +331,20 @@ class PDK_App:
         self.info.set(f"Target: {self.config['perf_pct']:.0f}% of diffraction limit.")
         self._update_output_buttons_state()
 
-    # ---------- plotting (static 2x2 inside main window) ----------
+    # ---------- plotting (optional) ----------
     def update_plots(self):
-        req = {"wavelength_um","substrate","resin","lens_diameter","working_distance","perf_pct"}
-        if not req <= self.config.keys():
-            self.warn.set("Complete steps 1–6 first.")
+        if not self._ensure_layout():
             return
-
+        d = self.current_layout_data
         self.fig.clear()
-        grid_res = int(np.clip(self.config["lens_diameter"] * self.PX_PER_MM, self.MIN_RES, self.MAX_RES))
-        if grid_res % 2 == 0: grid_res += 1
-
-        luts = generate_generic_luts(self.config["substrate"], self.config["resin"], self.config["wavelength_um"])
-        phase_to_dia, dia_to_fab = create_inverse_interpolators(luts["phase_lut"], luts["fab_lut"])
-
-        x, y, phase = calculate_phase_profile(self.config, grid_res)
-        diameters = phase_to_dia(phase)
-        fab_params = dia_to_fab(diameters)
-
-        r = np.sqrt(x**2 + y**2)
-        lens_radius_um = (self.config["lens_diameter"] / 2) * 1000.0
-        active = r <= lens_radius_um
-        diameters = np.where(active, diameters, 0.0)
-        fab_params = np.where(active, fab_params, 0.0)
-
-        self.current_layout_data = {"x": x, "y": y, "diameters": diameters,
-                                    "fab_params": fab_params, "fab_lut": luts["fab_lut"]}
-
         ((ax1, ax2), (ax3, ax4)) = self.fig.subplots(2, 2)
-        self._draw_lut(ax1, luts["phase_lut"])
-        self._draw_img(ax2, x, y, phase, "2. Ideal Phase Profile", "hsv")
-        self._draw_img(ax3, x, y, diameters, "3. Nanopillar Layout (nm)", "viridis")
-        self._draw_img(ax4, x, y, fab_params, f"4. {luts['fab_lut']['param_name']}", "plasma")
+        self._draw_lut(ax1, d["phase_lut"])
+        self._draw_img(ax2, d["x"], d["y"], d["phase"], "2. Ideal Phase Profile", "hsv")
+        self._draw_img(ax3, d["x"], d["y"], d["diameters"], "3. Nanopillar Layout (nm)", "viridis")
+        self._draw_img(ax4, d["x"], d["y"], d["fab_params"], f"4. {d['fab_lut']['param_name']}", "plasma")
         self.fig.tight_layout(pad=3.0)
         self.canvas.draw()
-        self.status.set("Design generated.")
-        self._update_output_buttons_state()
+        self.status.set("Design images generated.")
 
     def _draw_lut(self, ax, phase_lut):
         ax.plot(phase_lut["diameters_nm"], phase_lut["phases_rad"], "o-", color="#3b82f6")
@@ -339,34 +369,33 @@ class PDK_App:
         ax.set_aspect("equal", adjustable="box")
         self.fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
-    # ---------- Interactive vector viewer (KLayout-like circles) ----------
+    # ---------- Interactive vector viewer with view-culling ----------
     def _open_vector_layout_viewer(self):
-        data = self.current_layout_data
-        if not data:
-            self.status.set("Generate images first.")
+        if not self._ensure_layout():
             return
+        data = self.current_layout_data
 
         top = tk.Toplevel(self.root)
         top.title("Interactive Lens Layout — Vector Pillars (μm units; view-culling)")
 
-        # --- Controls ---
+        # Controls
         controls = tk.Frame(top)
         controls.pack(side=tk.TOP, fill=tk.X)
         tk.Label(controls, text="Decimation (stride):").pack(side=tk.LEFT, padx=(8, 4))
-        stride_var = tk.IntVar(value=1)   # dense by default so it's not empty
+        stride_var = tk.IntVar(value=1)
         tk.Scale(controls, from_=1, to=20, orient="horizontal", variable=stride_var,
-                showvalue=True, length=220).pack(side=tk.LEFT, padx=(0, 12))
+                 showvalue=True, length=220).pack(side=tk.LEFT, padx=(0, 12))
 
         tk.Label(controls, text="Min diameter (nm):").pack(side=tk.LEFT)
-        mind_var = tk.IntVar(value=20)    # permissive default
+        mind_var = tk.IntVar(value=20)
         tk.Scale(controls, from_=10, to=250, orient="horizontal", variable=mind_var,
-                showvalue=True, length=220).pack(side=tk.LEFT, padx=(0, 12))
+                 showvalue=True, length=220).pack(side=tk.LEFT, padx=(0, 12))
 
         count_lbl = tk.Label(controls, text="")
         count_lbl.pack(side=tk.RIGHT, padx=8)
 
-        # --- Figure + toolbar ---
-        fig = Figure(figsize=(8.8, 8.8), facecolor="#111827")
+        # Figure + toolbar
+        fig = plt.figure(figsize=(8.8, 8.8), facecolor="#111827")
         canvas = FigureCanvasTkAgg(fig, master=top)
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         toolbar = NavigationToolbar2Tk(canvas, top, pack_toolbar=False)
@@ -380,12 +409,10 @@ class PDK_App:
         ax.set_ylabel("Y (μm)")
         ax.set_title("Vector Pillar Layout (view-culling)")
 
-        # Pre-pull arrays
         x = data["x"]; y = data["y"]; dnm = data["diameters"]
         mask = dnm > 0.0
         R = (self.config["lens_diameter"] / 2) * 1000.0  # lens radius in μm
 
-        # Debounced redraw
         after_id = None
         def schedule_redraw(*_):
             nonlocal after_id
@@ -397,13 +424,11 @@ class PDK_App:
             after_id = top.after(60, draw_visible)
 
         def draw_visible():
-            # Current viewport
             x0, x1 = ax.get_xlim()
             y0, y1 = ax.get_ylim()
             s = max(1, int(stride_var.get()))
             min_nm = max(1, int(mind_var.get()))
 
-            # Decimate first, then cull to view & min diameter
             xs = x[::s, ::s]; ys = y[::s, ::s]; ds = dnm[::s, ::s]; mk = mask[::s, ::s]
             in_view = mk & (ds >= min_nm) & (xs >= x0) & (xs <= x1) & (ys >= y0) & (ys <= y1)
 
@@ -413,11 +438,10 @@ class PDK_App:
             ax.set_xlabel("X (μm)")
             ax.set_ylabel("Y (μm)")
             ax.set_title("Vector Pillar Layout (view-culling)")
-            # Keep the same viewport the user is looking at
             ax.set_xlim(x0, x1)
             ax.set_ylim(y0, y1)
 
-            # Lens outline (cheap)
+            # Lens outline ring (cheap)
             outline = Circle((0.0, 0.0), R, fill=False, lw=1.0, ec="white", alpha=0.7)
             ax.add_patch(outline)
 
@@ -427,7 +451,7 @@ class PDK_App:
                 radii_um = 0.5 * ds_v * 1e-3  # nm -> μm
                 circles = [Circle((float(cx), float(cy)), float(r)) for cx, cy, r in zip(xs_v, ys_v, radii_um)]
                 coll = PatchCollection(circles, facecolor="#ff5470", edgecolor="none",
-                                    alpha=0.85, antialiased=False)
+                                       alpha=0.85, antialiased=False)
                 ax.add_collection(coll)
                 count = len(circles)
             else:
@@ -437,34 +461,30 @@ class PDK_App:
             count_lbl.config(text=f"Pillars shown: {count:,}  (stride {s}, min d {min_nm} nm)")
             canvas.draw_idle()
 
-        # React to any limit change (pan/zoom) and mouse/scroll actions
+        # react to pan/zoom/scroll
         ax.callbacks.connect('xlim_changed', lambda _ax: schedule_redraw())
         ax.callbacks.connect('ylim_changed', lambda _ax: schedule_redraw())
         canvas.mpl_connect('scroll_event', schedule_redraw)
         canvas.mpl_connect('button_release_event', schedule_redraw)
 
-        # Initial zoom: start tight so draw cost is tiny (~10% of radius)
-        f = 0.15
+        # start tightly zoomed to avoid initial heavy draw (~10% of radius)
+        f = 0.10
         ax.set_xlim(-R * f, R * f)
         ax.set_ylim(-R * f, R * f)
 
-        # First paint
         draw_visible()
-
-        # Live updates from sliders
         stride_var.trace_add("write", schedule_redraw)
         mind_var.trace_add("write", schedule_redraw)
 
     # ---------- Estimate writing time ----------
     def _estimate_time(self):
-        req = {"lens_diameter","perf_pct"}
-        if not req <= self.config.keys():
-            self.status.set("Set lens diameter and Step 6 first.")
+        if not self._layout_requirements_met():
+            self.status.set("Set steps 1–6 first.")
             return
         D = self.config["lens_diameter"]          # mm
         area_mm2 = np.pi * (D/2)**2
         area_um2 = area_mm2 * 1e6                 # 1 mm^2 = 1e6 μm^2
-        # Realistic defaults (no fab info yet)
+        # Realistic defaults (no fab info needed)
         hatch_um = 0.5
         speed_ums = 5000
         layer_thickness_um = 0.5
@@ -477,10 +497,9 @@ class PDK_App:
 
     # ---------- CSV ----------
     def generate_csv_file(self):
-        data = self.current_layout_data
-        if not data:
-            self.status.set("No data to save. Generate images first.")
+        if not self._ensure_layout():
             return
+        data = self.current_layout_data
         path = filedialog.asksaveasfilename(
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
@@ -500,10 +519,9 @@ class PDK_App:
 
     # ---------- GDSII export for KLayout ----------
     def export_gdsii(self):
-        data = self.current_layout_data
-        if not data:
-            self.status.set("No layout yet. Generate images first.")
+        if not self._ensure_layout():
             return
+        data = self.current_layout_data
         try:
             import gdstk  # modern gdspy successor
         except Exception:
@@ -529,6 +547,7 @@ class PDK_App:
         target = 150_000
         stride = max(1, int(np.ceil(np.sqrt(total / target))))
         min_d_nm = 20.0  # ignore tiny features
+
         lib = gdstk.Library(unit=1e-6, precision=1e-9)
         cell = lib.new_cell("METALENS")
 
@@ -552,8 +571,17 @@ class PDK_App:
                 cell.add(circ)
                 count += 1
 
+        # Lens outline as a thin ring on a separate layer (to avoid a filled-hatched disk)
         lens_radius_um = (self.config["lens_diameter"] / 2) * 1000.0
-        outline = gdstk.ellipse((0.0, 0.0), lens_radius_um, tolerance=0.1, layer=10, datatype=0)
+        ring_w_um = max(1.0, 0.002 * lens_radius_um)  # ~0.2% of radius, min 1 µm
+        outline = gdstk.ellipse(
+            (0.0, 0.0),
+            lens_radius_um,
+            inner_radius=lens_radius_um - ring_w_um,
+            tolerance=0.1,
+            layer=100,  # outline layer
+            datatype=0
+        )
         cell.add(outline)
 
         try:
