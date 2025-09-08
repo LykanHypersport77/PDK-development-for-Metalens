@@ -3,12 +3,11 @@ from tkinter import ttk, filedialog
 import tkinter.font as tkfont
 import numpy as np
 from scipy.interpolate import interp1d
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.patches import Circle, RegularPolygon
 from matplotlib.collections import PatchCollection
-import matplotlib as mpl
-from matplotlib import colors as mpl_colors
 
 # ----------------------------- Materials / Resins -----------------------------
 MATERIALS = {
@@ -90,11 +89,12 @@ def create_inverse_interpolators(phase_lut, fab_lut):
 # ----------------------------- Helpers -----------------------------
 def choice_map(pairs): return {a: b for a, b in pairs}
 
-WL_CHOICES = [("λ = 9 μm", 9.0), ("λ = 10 μm", 10.0)]
-DIAM_CHOICES = [("1.5 mm", 1.5), ("10 mm", 10.0), ("15 mm", 15.0), ("20 mm", 20.0), ("25 mm", 25.0)]
-PITCH_CHOICES = [("5 µm", 5.0), ("7 µm", 7.0), ("9 µm", 9.0), ("12 µm", 12.0)]
-WD_CHOICES = [("5 mm", 5.0), ("25 mm", 25.0), ("50 mm", 50.0), ("100 mm", 100.0), ("200 mm", 200.0)]
-METHOD_LIST = list(METHODS.keys())
+WL_CHOICES   = [("λ = 9 μm", 9.0), ("λ = 10 μm", 10.0)]
+DIAM_CHOICES = [("50 µm", 0.05), ("75 µm", 0.075), ("100 µm", 0.10),  # micro options
+                ("1.5 mm", 1.5), ("10 mm", 10.0), ("15 mm", 15.0), ("20 mm", 20.0), ("25 mm", 25.0)]
+PITCH_CHOICES= [("5 µm", 5.0), ("7 µm", 7.0), ("9 µm", 9.0), ("12 µm", 12.0)]
+WD_CHOICES   = [("5 mm", 5.0), ("25 mm", 25.0), ("50 mm", 50.0), ("100 mm", 100.0), ("200 mm", 200.0)]
+METHOD_LIST  = list(METHODS.keys())
 
 LAYOUT_KEYS = [
     "wavelength_um","substrate","resin",
@@ -110,6 +110,9 @@ class PDK_App:
         self.root.title("Metalens PDK — WIP")
         self.root.configure(bg="#111827")
 
+        # Rendering preference: make realized map look smoother (no new values introduced)
+        self.REALIZED_UPSAMPLE = 3  # 1 = original, 2/3/4 = finer visualization
+
         # -------- Bigger fonts --------
         for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont", "TkTooltipFont"):
             try: tkfont.nametofont(name).configure(size=12)
@@ -121,14 +124,14 @@ class PDK_App:
         style.configure("TButton", background="#374151", foreground="white", font=("Inter", 12))
         style.configure("Header.TLabel", background="#1f2937", foreground="#e5e7eb", font=("Inter", 14, "bold"))
 
-        # -------- Defaults (Frustum is default now) --------
+        # -------- Defaults (Frustum) --------
         self.config = {
             "wavelength_um": WL_CHOICES[0][1],
             "substrate": list(MATERIALS.keys())[0],
             "resin": list(RESINS.keys())[0],
             "shape": "frustum",          # default geometry
             "sides": 10,
-            "lens_diameter": DIAM_CHOICES[1][1],
+            "lens_diameter": DIAM_CHOICES[3][1],  # 1.5 mm default
             "pitch_um": PITCH_CHOICES[2][1],
             "working_distance": WD_CHOICES[1][1],
             "perf_pct": 80.0,
@@ -164,7 +167,6 @@ class PDK_App:
                                     command=self._open_vector_layout_viewer)
         self.btn_viewer.pack(fill=tk.X, pady=(0, 6))
 
-        # 3D CAD viewer — FULL LENS by default; only stride + min d controls
         self.btn_cad3d = tk.Button(out, text="Open 3D CAD view (full lens)",
                                    bg="#d97706", fg="white", font=("Inter", 12, "bold"),
                                    relief="raised", activebackground="#b45309",
@@ -193,7 +195,7 @@ class PDK_App:
         ttk.Label(out, textvariable=self.status, wraplength=380).pack(anchor="w", pady=(8, 0))
 
         plt.style.use("dark_background")
-        self.fig = plt.figure(figsize=(7.5, 6.5), facecolor="#111827")
+        self.fig = plt.figure(figsize=(12.5, 8.0), facecolor="#111827")
         self.canvas = FigureCanvasTkAgg(self.fig, master=right)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
@@ -228,10 +230,10 @@ class PDK_App:
         self.sides_scale = tk.Scale(parent, from_=8, to=12, orient="horizontal",
                                     showvalue=True, resolution=1, length=320,
                                     variable=self.var_sides, command=lambda *_: self._on_any_change())
-        self.sides_scale.pack(fill=tk.X)  # enabled initially (frustum default)
+        self.sides_scale.pack(fill=tk.X)
 
         add_label("4) Lens aperture (diameter)")
-        self.var_D = tk.StringVar(value="10 mm")
+        self.var_D = tk.StringVar(value="1.5 mm")
         ttk.OptionMenu(parent, self.var_D, self.var_D.get(), *choice_map(DIAM_CHOICES).keys(),
                        command=lambda *_: self._on_any_change()).pack(fill=tk.X)
 
@@ -263,22 +265,22 @@ class PDK_App:
     # ---------- Respond to any change ----------
     def _on_any_change(self):
         wl_map = choice_map(WL_CHOICES)
-        D_map = choice_map(DIAM_CHOICES)
-        p_map = choice_map(PITCH_CHOICES)
-        f_map = choice_map(WD_CHOICES)
+        D_map  = choice_map(DIAM_CHOICES)
+        p_map  = choice_map(PITCH_CHOICES)
+        f_map  = choice_map(WD_CHOICES)
 
-        self.config["wavelength_um"] = wl_map[self.var_wl.get()]
-        self.config["substrate"] = self.var_sub.get()
-        self.config["resin"] = self.var_resin.get()
-        self.config["shape"] = "frustum" if self.var_shape.get().lower().startswith("frustum") else "cylinder"
-        self.config["sides"] = int(self.var_sides.get())
+        self.config["wavelength_um"]  = wl_map[self.var_wl.get()]
+        self.config["substrate"]      = self.var_sub.get()
+        self.config["resin"]          = self.var_resin.get()
+        self.config["shape"]          = "frustum" if self.var_shape.get().lower().startswith("frustum") else "cylinder"
+        self.config["sides"]          = int(self.var_sides.get())
         self.sides_scale.configure(state=("normal" if self.config["shape"] == "frustum" else "disabled"))
 
-        self.config["lens_diameter"] = D_map[self.var_D.get()]
-        self.config["pitch_um"] = p_map[self.var_pitch.get()]
-        self.config["working_distance"] = f_map[self.var_f.get()]
-        self.config["perf_pct"] = float(self.var_perf.get())
-        self.config["method"] = self.var_method.get()
+        self.config["lens_diameter"]  = D_map[self.var_D.get()]
+        self.config["pitch_um"]       = p_map[self.var_pitch.get()]
+        self.config["working_distance"]= f_map[self.var_f.get()]
+        self.config["perf_pct"]       = float(self.var_perf.get())
+        self.config["method"]         = self.var_method.get()
 
         self.current_layout_data = {}
         self._layout_key = None
@@ -296,8 +298,13 @@ class PDK_App:
         sub = self.config["substrate"]
         rng = MATERIALS[sub]["lambda_range_um"]; n = MATERIALS[sub]["n"]
         D = self.config["lens_diameter"]; f = self.config["working_distance"]
-        na = D / (2.0 * f)
-        self.info.set(f"{sub}: n≈{n:.2f}, usable λ ≈ {rng[0]}–{rng[1]} μm.  NA≈{na:.3f}")
+        na = (D*1000.0) / (2.0 * f * 1000.0)  # D(mm)->um cancels; keep readable
+        extra = ""
+        if self.config["method"] == "fs two-photon AM":
+            build = 100.0  # µm typical
+            curr = D * 1000.0  # mm -> µm
+            extra = f" | fs two-photon AM build-size limit ≈ {build} µm; current D = {curr:.0f} µm"
+        self.info.set(f"{sub}: n≈{n:.2f}, usable λ ≈ {rng[0]}–{rng[1]} μm.  NA≈{na:.3f}{extra}")
         if na < 0.01:
             self.warn.set("Warning: NA < 0.01 → very weak focusing.")
         elif na > 0.90:
@@ -306,7 +313,6 @@ class PDK_App:
             self.warn.set("")
 
     # ---------- Core compute ----------
-    def _layout_requirements_met(self): return True
     def _current_cache_key(self): return tuple(self.config.get(k) for k in LAYOUT_KEYS)
 
     def _compute_layout(self):
@@ -330,14 +336,13 @@ class PDK_App:
         diameters = phase_to_dia(ideal_wrapped)
         fab_params = dia_to_fab(diameters)
 
-        active = r <= radius_um  # keep mask to remove red background in plots
+        active = r <= radius_um
         diameters = np.where(active, diameters, 0.0)
         fab_params = np.where(active, fab_params, 0.0)
 
-        realized_phase = dia_to_phase(np.clip(diameters,
-                                              luts["phase_lut"]["diameters_nm"].min(),
-                                              luts["phase_lut"]["diameters_nm"].max()))
-        realized_phase = np.where(active, np.mod(realized_phase, 2*np.pi), np.nan)  # NaN outside -> no red bg
+        realized_phase = dia_to_phase(np.clip(
+            diameters, luts["phase_lut"]["diameters_nm"].min(), luts["phase_lut"]["diameters_nm"].max()))
+        realized_phase = np.where(active, np.mod(realized_phase, 2*np.pi), np.nan)
 
         self.current_layout_data = {
             "x": x, "y": y,
@@ -350,7 +355,7 @@ class PDK_App:
         }
         self._layout_key = self._current_cache_key()
 
-        # DRC info
+        # Simple DRC info
         active_d = diameters[active]
         if active_d.size:
             max_d_um = float(active_d.max()) * 1e-3
@@ -364,52 +369,87 @@ class PDK_App:
             return self._compute_layout()
         return True
 
+    # ---------- Height/phase helpers ----------
+    def _h_2pi_um(self):
+        """Physically-informed 2π height (tunable)."""
+        lam   = float(self.config["wavelength_um"])          # µm
+        n_eff = RESINS[self.config["resin"]]["n_eff"]
+        n_env = 1.0  # air; adjust if using immersion/cladding
+        delta_n = max(1e-3, abs(n_eff - n_env))
+        k_shape  = 1.15 if self.config.get("shape","frustum")=="frustum" else 1.0
+        k_method = METHODS[self.config["method"]].get("h2pi_scale", 1.0)  # <-- FIXED indexing
+        k_perf   = max(0.6, min(1.2, self.config["perf_pct"]/80.0))
+        return (lam / delta_n) * k_shape * k_method * k_perf
+
+    def _pillar_heights_um(self, wrapped_phase):
+        """Map wrapped phase [0..2π] → pillar height using _h_2pi_um()."""
+        h2pi = self._h_2pi_um()
+        arr = np.asarray(wrapped_phase, dtype=float)
+        out = np.where(np.isfinite(arr), (arr / (2.0 * np.pi)) * h2pi, np.nan)
+        return out
+
     # ---------- Plots ----------
     def update_plots(self):
         if not self._ensure_layout(): return
         d = self.current_layout_data
+
         self.fig.clear()
-        ((ax1, ax2), (ax3, ax4)) = self.fig.subplots(2, 2)
+        (self.ax1, self.ax2), (self.ax3, self.ax4) = self.fig.subplots(2, 2)
+        ax1, ax2, ax3, ax4 = self.ax1, self.ax2, self.ax3, self.ax4
 
-        # 1) LUT
-        ax1.plot(d["phase_lut"]["diameters_nm"], d["phase_lut"]["phases_rad"], "o-", color="#3b82f6")
-        ax1.set_title("1. Meta-Atom LUT")
-        ax1.set_xlabel("Pillar Diameter (nm)")
-        ax1.set_ylabel("Phase Shift (rad)")
-        ax1.set_yticks([0, np.pi/2, np.pi, 3*np.pi/2, 2*np.pi])
-        ax1.set_yticklabels(["0", "π/2", "π", "3π/2", "2π"])
-        ax1.grid(True, linestyle="--", alpha=0.5)
+        for ax in (ax1, ax2, ax3, ax4):
+            ax.set_facecolor("#111827")
 
-        # 2) Realized phase — background outside lens is masked (no red)
-        self._draw_img(ax2, d["x"], d["y"], d["phase_realized"], d["active_mask"],
-                       "2. Realized Phase Shift Profile", "hsv")
+        # 1) IDEAL PHASE (wrapped)
+        self._draw_img_um(ax1, d["x"], d["y"], d["phase_ideal"], d["active_mask"],
+                          "Ideal phase (wrapped)", cmap="twilight")
+        # 2) REALIZED PHASE (wrapped, finer viz)
+        realized = d["phase_realized"]
+        realized_fine = self._upsample_nearest(realized, self.REALIZED_UPSAMPLE)
+        self._draw_img_um(ax2, d["x"], d["y"], realized_fine,  # extent still original; imshow handles it
+                          np.repeat(np.repeat(d["active_mask"], self.REALIZED_UPSAMPLE, 0),
+                                    self.REALIZED_UPSAMPLE, 1),
+                          "Realized phase (wrapped, finer viz)", cmap="twilight")
 
-        # 3) Diameters
-        self._draw_img(ax3, d["x"], d["y"], d["diameters"], d["active_mask"],
-                       "3. Nanopillar Layout (nm)", "viridis")
+        # 3) ATOM HEIGHT MAP (µm) from realized phase
+        h_um = self._pillar_heights_um(d["phase_realized"])
+        self._draw_img_um(ax3, d["x"], d["y"], h_um, d["active_mask"],
+                          "Atom height map (µm)", cmap="viridis")
 
-        # 4) Fab proxy
-        self._draw_img(ax4, d["x"], d["y"], d["fab_params"], d["active_mask"],
-                       f"4. {d['fab_lut']['param_name']}", "plasma")
+        # 4) BASE DIAMETER MAP (µm)
+        d_um = np.where(d["diameters"] > 0, d["diameters"] * 1e-3, np.nan)  # nm -> µm
+        self._draw_img_um(ax4, d["x"], d["y"], d_um, d["active_mask"],
+                          "Atom base diameter map (µm)", cmap="turbo")
 
-        self.fig.tight_layout(pad=2.6)
+        self.fig.tight_layout(pad=2.0)
         self.canvas.draw()
-        self.status.set("Phase shift profile generated (realized via LUT).")
+        self.status.set("Ideal + realized phase maps generated (finer viz enabled for realized).")
 
-    def _draw_img(self, ax, x, y, data, mask, title, cmap):
-        arr = np.where(mask, data, np.nan)  # mask outside lens -> no harsh background
-        valid = arr[np.isfinite(arr)]
-        vmin, vmax = (float(valid.min()), float(valid.max())) if valid.size else (0.0, 1.0)
-        im = ax.imshow(
-            arr,
-            extent=[x.min()/1000.0, x.max()/1000.0, y.min()/1000.0, y.max()/1000.0],
-            cmap=cmap, origin="lower", vmin=vmin, vmax=vmax
-        )
-        ax.set_facecolor("#111827")
+    def _upsample_nearest(self, arr, factor):
+        if factor <= 1 or arr is None:
+            return arr
+        return np.repeat(np.repeat(arr, factor, axis=0), factor, axis=1)
+
+    def _draw_img_um(self, ax, x, y, data, mask, title, cmap="viridis"):
+        arr = np.where(mask, data, np.nan)
+        finite = np.isfinite(arr)
+        if np.any(finite):
+            vmin = float(np.nanmin(arr))
+            vmax = float(np.nanmax(arr))
+            if vmin == vmax:  # avoid singular color range
+                vmin, vmax = vmin - 1e-6, vmax + 1e-6
+        else:
+            vmin, vmax = 0.0, 1.0
+
+        im = ax.imshow(arr, extent=[x.min(), x.max(), y.min(), y.max()],
+                       origin="lower", cmap=cmap, vmin=vmin, vmax=vmax, interpolation="nearest")
         ax.set_title(title)
-        ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)")
+        ax.set_xlabel("x (µm)")
+        ax.set_ylabel("y (µm)")
         ax.set_aspect("equal", adjustable="box")
-        self.fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar = self.fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        # Small, readable ticks
+        cbar.ax.tick_params(labelsize=9)
 
     # ---------- Interactive vector viewer (view-culling) ----------
     def _open_vector_layout_viewer(self):
@@ -428,7 +468,7 @@ class PDK_App:
                  showvalue=True, length=240, command=lambda *_: schedule_redraw()).pack(side=tk.LEFT, padx=(0, 12))
         count_lbl = tk.Label(controls, text="", font=("Inter", 12)); count_lbl.pack(side=tk.RIGHT, padx=8)
 
-        fig = plt.figure(figsize=(8.2, 8.2), facecolor="#111827")
+        fig = plt.figure(figsize=(8.3, 8.3), facecolor="#111827")
         canvas = FigureCanvasTkAgg(fig, master=top); canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         toolbar = NavigationToolbar2Tk(canvas, top, pack_toolbar=False); toolbar.update(); toolbar.pack(side=tk.BOTTOM, fill=tk.X)
         ax = fig.add_subplot(111); ax.set_aspect("equal", adjustable="box"); ax.set_facecolor("#111827")
@@ -489,22 +529,14 @@ class PDK_App:
         ax.set_xlim(-R * f, R * f); ax.set_ylim(-R * f, R * f)
         draw_visible()
 
-    # ---------- Height model ----------
-    def _h_2pi_um(self):
-        neff = RESINS[self.config["resin"]]["n_eff"]
-        shape = self.config.get("shape", "frustum")
-        base = 10.0 if shape == "frustum" else 5.0  # µm @ n≈1.5
-        scale = METHODS[self.config["method"]]["h2pi_scale"]
-        return base * (1.5 / neff) * scale * max(0.6, min(1.2, self.config["perf_pct"] / 80.0))
-
-    def _pillar_heights_um(self, wrapped_phase):
-        return (wrapped_phase / (2.0 * np.pi)) * self._h_2pi_um()
-
     # ---------- Estimate writing time ----------
     def _estimate_time(self):
         if not self._ensure_layout(): return
         d = self.current_layout_data
-        h_um = self._h_2pi_um() * (np.nanmean(d["phase_realized"][np.isfinite(d["phase_realized"])]) / (2*np.pi))
+        # average realized phase as a fraction of 2π, then infer typical height
+        mean_wrapped = np.nanmean(d["phase_realized"])
+        h_um = (mean_wrapped / (2*np.pi)) * self._h_2pi_um()
+
         d_nm = d["diameters"]; mask = d_nm > 0
         area_pillars_um2 = (np.pi / 4.0) * np.sum((d_nm[mask] ** 2)) * 1e-6
 
@@ -603,9 +635,8 @@ class PDK_App:
             import tempfile
             import plotly.graph_objects as go
             from plotly.offline import plot as plotly_plot
-            from matplotlib import cm, colors as mpl_colors
         except Exception:
-            self.status.set("3D CAD view needs Plotly + Matplotlib. Install: pip install plotly matplotlib")
+            self.status.set("3D CAD view needs Plotly. Install: pip install plotly")
             return
 
         d = self.current_layout_data
@@ -616,10 +647,8 @@ class PDK_App:
 
         R = (self.config["lens_diameter"] / 2.0) * 1000.0
         H2pi = self._h_2pi_um()
-        # height from realized wrapped phase (0..2π) → 0..H2pi
         h_um = (phase / (2.0 * np.pi)) * H2pi
 
-        # UI (only stride + min d)
         top = tk.Toplevel(self.root); top.title("3D CAD (Plotly/WebGL) — full lens")
 
         row = tk.Frame(top); row.pack(side=tk.TOP, fill=tk.X)
@@ -641,43 +670,34 @@ class PDK_App:
                 command=lambda: render()).pack(side=tk.LEFT, padx=8)
         status_lbl = tk.Label(btns, text="", font=("Inter", 12)); status_lbl.pack(side=tk.LEFT, padx=8)
 
-        # --- helper to convert scalar -> hex colors (gentle colormap) ---
-        cmap = mpl.colormaps.get_cmap("twilight_shifted")   # softer than hsv
-        def scalar_to_hex(u01):
-            rgba = cmap(np.clip(u01, 0.0, 1.0))
-            return mpl_colors.to_hex(rgba, keep_alpha=False)
-
         # ---------- mesh builder with top/bottom caps + per-vertex colors ----------
         def build_frustums(cx, cy, hh, d_nm, phi):
-            """Return Mesh3d triangles + vertex colors for all pillars (capped)."""
             Vx = []; Vy = []; Vz = []; I = []; J = []; K = []; VC = []
             vert_ofs = 0
-
             rb = 0.5 * (d_nm * 1e-3)  # base radius (µm)
             taper = 0.55 if self.config.get("shape", "frustum") == "frustum" else 1.0
-            rt = rb * taper           # top radius (µm)
-
+            rt = rb * taper
             sides = int(max(3, self.config.get("sides", 10)))
             ang = np.linspace(0, 2*np.pi, sides, endpoint=False)
             ca, sa = np.cos(ang), np.sin(ang)
 
-            # color by realized phase (wrap to 0..1)
-            col_u = (phi % (2*np.pi)) / (2*np.pi)
-            col_hex = [scalar_to_hex(u) for u in col_u]
+            # map phase to color with a gentle built-in Plotly colorscale
+            def phase_color(u):
+                # u in [0, 2π)
+                t = (u % (2*np.pi)) / (2*np.pi)
+                # shades of twilight-ish: interpolate between key colors
+                return f"hsl({int(360*t)}, 60%, 60%)"
 
-            def add_tri(a, b, c):
-                I.append(a); J.append(b); K.append(c)
+            def add_tri(a, b, c): I.append(a); J.append(b); K.append(c)
 
-            for Xc, Yc, H, RB, RT, c in zip(cx, cy, hh, rb, rt, col_hex):
-                # ring vertices (bottom then top)
+            for Xc, Yc, H, RB, RT, ph in zip(cx, cy, hh, rb, rt, phi):
                 xb = Xc + RB * ca; yb = Yc + RB * sa; zb = np.zeros_like(xb)
                 xt = Xc + RT * ca; yt = Yc + RT * sa; zt = np.full_like(xt, H)
-
-                # append ring vertices + colors
-                Vx.extend(xb); Vy.extend(yb); Vz.extend(zb); VC.extend([c] * len(xb))  # bottom ring
-                Vx.extend(xt); Vy.extend(yt); Vz.extend(zt); VC.extend([c] * len(xt))  # top ring
+                Vx.extend(xb); Vy.extend(yb); Vz.extend(zb)
+                Vx.extend(xt); Vy.extend(yt); Vz.extend(zt)
                 base = vert_ofs
                 topb = base + sides
+                c = phase_color(ph)
 
                 # side walls
                 for k in range(sides):
@@ -687,26 +707,22 @@ class PDK_App:
                     v3 = topb + ((k + 1) % sides)
                     add_tri(v0, v1, v2)
                     add_tri(v1, v3, v2)
-
-                # top cap (fan)
+                # top cap
                 ct = base + 2 * sides
-                Vx.append(Xc); Vy.append(Yc); Vz.append(H); VC.append(c)
+                Vx.append(Xc); Vy.append(Yc); Vz.append(H)
                 for k in range(sides):
                     add_tri(ct, topb + k, topb + ((k + 1) % sides))
-
-                # bottom cap (fan)
+                # bottom cap
                 cb = ct + 1
-                Vx.append(Xc); Vy.append(Yc); Vz.append(0.0); VC.append(c)
+                Vx.append(Xc); Vy.append(Yc); Vz.append(0.0)
                 for k in range(sides):
                     add_tri(cb, base + ((k + 1) % sides), base + k)
-
+                # vertex colors (constant per vertex here)
+                VC.extend([c] * (2*sides + 2))
                 vert_ofs = cb + 1
 
-            return (np.array(Vx), np.array(Vy), np.array(Vz),
-                    np.array(I), np.array(J), np.array(K),
-                    np.array(VC))
+            return np.array(Vx), np.array(Vy), np.array(Vz), np.array(I), np.array(J), np.array(K), np.array(VC)
 
-        # ---------- deterministic grid selection over FULL lens ----------
         def select_points():
             s0 = int(max(1, stride_var.get()))
             xs = x[::s0, ::s0]; ys = y[::s0, ::s0]
@@ -714,10 +730,8 @@ class PDK_App:
             rr = np.sqrt(xs**2 + ys**2)
             mk = (ds >= float(mind_var.get())) & (rr <= R)
 
-            # triangle budget (preserve rings by increasing stride deterministically)
             MAX_TRIANGLES = 500_000
             sides_here = int(max(3, self.config.get("sides", 10)))
-            # each pillar ~ (2*sides walls + 2*sides caps) ≈ 4*sides triangles
             max_by_tri = max(1000, MAX_TRIANGLES // (4 * sides_here))
             MAX_PILLARS = min(15000, max_by_tri)
 
@@ -745,7 +759,6 @@ class PDK_App:
                 lightposition=dict(x=0, y=0, z=2000)
             )
 
-            # lens outline at z=0 for context
             th = np.linspace(0, 2*np.pi, 512)
             outline = go.Scatter3d(x=R*np.cos(th), y=R*np.sin(th), z=np.zeros_like(th),
                                 mode="lines", line=dict(color="rgba(255,255,255,0.6)", width=2),
@@ -762,17 +775,16 @@ class PDK_App:
                 ),
                 template="plotly_dark",
                 margin=dict(l=0, r=0, t=40, b=0),
-                # Start top-down so rings are obvious
                 scene_camera=dict(eye=dict(x=0.01, y=0.01, z=2.8))
             )
 
+            import tempfile
+            from plotly.offline import plot as plotly_plot
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".html"); tmp.close()
             plotly_plot(fig, filename=tmp.name, auto_open=True)
             status_lbl.config(text=f"Opened in browser (pillars: {n:,}).")
 
-        # initial render
         render()
-
 
 # ----------------------------- Main -----------------------------
 if __name__ == "__main__":
