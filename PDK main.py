@@ -1,6 +1,11 @@
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import filedialog
 import tkinter.font as tkfont
+
+# For the modern UI theme and widgets
+import ttkbootstrap as ttk
+from ttkbootstrap.constants import *
+
 import numpy as np
 from scipy.interpolate import interp1d
 import matplotlib as mpl
@@ -8,6 +13,9 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.patches import Circle, RegularPolygon
 from matplotlib.collections import PatchCollection
+
+# (All your scientific and helper functions like generate_luts_for_method,
+# create_inverse_interpolators, VScrollFrame, etc., remain unchanged)
 
 # ----------------------------- Materials / Resins -----------------------------
 MATERIALS = {
@@ -28,13 +36,13 @@ RESINS = {
 METHODS = {
     "Single-photon AM": {
         "compatible_resins": {"NOA + TiO2", "ORMOCER + ZrO2"},
-        "d_frac": (0.30, 0.80),   # 30–80% of pitch
+        "d_frac": (0.30, 0.80),  # 30–80% of pitch
         "quant_um": 0.10,
         "h2pi_scale": 0.85,
     },
     "fs two-photon AM": {
         "compatible_resins": {"IP-Dip + TiO2", "IP-Dip + SiO2", "ORMOCER + ZrO2"},
-        "d_frac": (0.20, 0.90),   # 20–90% of pitch
+        "d_frac": (0.20, 0.90),  # 20–90% of pitch
         "quant_um": 0.05,
         "h2pi_scale": 1.00,
     },
@@ -87,49 +95,36 @@ def create_inverse_interpolators(phase_lut, fab_lut):
     return phase_to_dia, dia_to_phase, dia_to_fab
 
 # ----------------------------- Helpers -----------------------------
-class VScrollFrame(tk.Frame):
-    """A vertical scrollable frame that plays nicely with Matplotlib:
-       - Mousewheel scroll only when the pointer is over the left column.
-       - Auto-resizes inner width to the canvas.
-    """
-    def __init__(self, parent, *, bg="#1f2937", width=420, **kwargs):
-        super().__init__(parent, bg=bg, **kwargs)
-        self._bg = bg
+class VScrollFrame(ttk.Frame):
+    """A vertical scrollable frame that plays nicely with Matplotlib."""
+    def __init__(self, parent, **kwargs):
+        super().__init__(parent, **kwargs)
         self._wheelbound = False
 
-        # Canvas + vertical scrollbar
-        self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0, width=width)
+        self.canvas = tk.Canvas(self, highlightthickness=0, bd=0)
         self.vsb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=self.vsb.set)
 
         self.canvas.pack(side="left", fill="both", expand=True)
         self.vsb.pack(side="right", fill="y")
 
-        # Inner frame that will hold your controls
-        self.body = tk.Frame(self.canvas, bg=bg)
+        self.body = ttk.Frame(self.canvas)
         self._win = self.canvas.create_window((0, 0), window=self.body, anchor="nw")
 
-        # Keep scrollregion and width in sync
         self.body.bind("<Configure>", self._on_body_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
-
-        # Mouse wheel handling — bind only when hovered
         self.body.bind("<Enter>", self._bind_mousewheel)
         self.body.bind("<Leave>", self._unbind_mousewheel)
 
     def _on_body_configure(self, _evt):
-        # Update scrollable region
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _on_canvas_configure(self, evt):
-        # Make inner frame match canvas width
         self.canvas.itemconfigure(self._win, width=evt.width)
 
-    # Windows / macOS wheel
     def _on_wheel(self, evt):
         self.canvas.yview_scroll(int(-evt.delta/120), "units")
 
-    # Linux wheel
     def _on_wheel_up(self, _evt):   self.canvas.yview_scroll(-1, "units")
     def _on_wheel_down(self, _evt): self.canvas.yview_scroll(+1, "units")
 
@@ -152,8 +147,9 @@ class VScrollFrame(tk.Frame):
 
 def choice_map(pairs): return {a: b for a, b in pairs}
 
+# --- Constants ---
 WL_CHOICES   = [("λ = 9 μm", 9.0), ("λ = 10 μm", 10.0)]
-DIAM_CHOICES = [("50 µm", 0.05), ("75 µm", 0.075), ("100 µm", 0.10),  # micro options
+DIAM_CHOICES = [("50 µm", 0.05), ("75 µm", 0.075), ("100 µm", 0.10),
                 ("1.5 mm", 1.5), ("10 mm", 10.0), ("15 mm", 15.0), ("20 mm", 20.0), ("25 mm", 25.0)]
 PITCH_CHOICES= [("5 µm", 5.0), ("7 µm", 7.0), ("9 µm", 9.0), ("12 µm", 12.0)]
 WD_CHOICES   = [("5 mm", 5.0), ("25 mm", 25.0), ("50 mm", 50.0), ("100 mm", 100.0), ("200 mm", 200.0)]
@@ -170,218 +166,214 @@ LAYOUT_KEYS = [
 class PDK_App:
     def __init__(self, root):
         self.root = root
-        self.root.title("Metalens PDK — WIP")
-        self.root.configure(bg="#111827")
+        self.root.title("Metalens PDK")
 
-        self.REALIZED_UPSAMPLE = 3  
-
-        # -------- Bigger fonts --------
-        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont", "TkTooltipFont"):
-            try: tkfont.nametofont(name).configure(size=12)
-            except Exception: pass
-
-        style = ttk.Style()
-        style.configure("TLabel", background="#1f2937", foreground="white", font=("Inter", 13))
-        style.configure("TMenubutton", background="#374151", foreground="white", font=("Inter", 13))
-        style.configure("TButton", background="#374151", foreground="white", font=("Inter", 13))
-        style.configure("Header.TLabel", background="#1f2937", foreground="#e5e7eb", font=("Inter", 15, "bold"))
+        self.REALIZED_UPSAMPLE = 3
 
         # -------- Defaults (Frustum) --------
         self.config = {
             "wavelength_um": WL_CHOICES[0][1],
             "substrate": list(MATERIALS.keys())[0],
             "resin": list(RESINS.keys())[0],
-            "shape": "frustum",          # default geometry
+            "shape": "frustum",
             "sides": 10,
-            "lens_diameter": DIAM_CHOICES[3][1],  # 1.5 mm default
+            "lens_diameter": DIAM_CHOICES[3][1],
             "pitch_um": PITCH_CHOICES[2][1],
             "working_distance": WD_CHOICES[1][1],
             "perf_pct": 80.0,
-            "method": METHOD_LIST[1],    # fs two-photon AM
+            "method": METHOD_LIST[1],
         }
         self.current_layout_data = {}
         self._layout_key = None
 
         # -------- Frames --------
-        left_sf = VScrollFrame(root, bg="#1f2937", width=600)
+        left_sf = VScrollFrame(root, width=500, bootstyle=SECONDARY)
         left_sf.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
-        left = left_sf.body  # <- use this 'left' exactly as before for all your widgets
+        left = left_sf.body
         left_sf.scroll_to_top()
 
-        right = tk.Frame(root, bg="#111827"); right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=10, pady=10)
+        right = ttk.Frame(root)
+        right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(0, 10), pady=10)
 
-        ttk.Label(left, text="Design Controls", style="Header.TLabel").pack(anchor="w", pady=(0, 8))
-        self.info = tk.StringVar(value=""); self.warn = tk.StringVar(value="")
-        ttk.Label(left, textvariable=self.info, wraplength=380, foreground="#c7d2fe").pack(anchor="w")
-        ttk.Label(left, textvariable=self.warn, wraplength=380, foreground="#fca5a5").pack(anchor="w", pady=(0, 6))
+        # -------- Left Panel Widgets --------
+        ttk.Label(left, text="Metalens PDK", font=("Inter", 18, "bold")).pack(anchor="w", pady=(0, 5), padx=5)
 
-        self.controls_frame = tk.Frame(left, bg="#1f2937"); self.controls_frame.pack(fill=tk.X)
-        self._build_all_controls(self.controls_frame)
+        self.info = tk.StringVar(value="")
+        self.warn = tk.StringVar(value="")
+        ttk.Label(left, textvariable=self.info, wraplength=420, bootstyle=INFO).pack(anchor="w", padx=5)
+        ttk.Label(left, textvariable=self.warn, wraplength=420, bootstyle=DANGER).pack(anchor="w", pady=(0, 10), padx=5)
 
-        out = tk.Frame(left, bg="#1f2937"); out.pack(fill=tk.X, pady=(12, 0))
-        ttk.Label(out, text="Output", style="Header.TLabel").pack(anchor="w", pady=(0, 6))
+        self._build_all_controls(left)
 
-        self.btn_generate = tk.Button(out, text="Generate phase shift profile",
-                                      bg="#2563eb", fg="white", font=("Inter", 12, "bold"),
-                                      relief="raised", activebackground="#1d4ed8",
-                                      command=self.update_plots)
-        self.btn_generate.pack(fill=tk.X, pady=(2, 6))
-
-        self.btn_viewer = tk.Button(out, text="Open Interactive Lens Layout (vector)",
-                                    bg="#9333ea", fg="white", font=("Inter", 12, "bold"),
-                                    relief="raised", activebackground="#7e22ce",
-                                    command=self._open_vector_layout_viewer)
-        self.btn_viewer.pack(fill=tk.X, pady=(0, 6))
-
-        self.btn_cad3d = tk.Button(out, text="Open 3D CAD view (full lens)",
-                                   bg="#d97706", fg="white", font=("Inter", 12, "bold"),
-                                   relief="raised", activebackground="#b45309",
-                                   command=self._open_3d_cad_plotly_full)
-        self.btn_cad3d.pack(fill=tk.X, pady=(0, 6))
-
-        self.btn_export_gds = tk.Button(out, text="Export GDSII (KLayout)",
-                                        bg="#ea580c", fg="white", font=("Inter", 12, "bold"),
-                                        relief="raised", activebackground="#c2410c",
-                                        command=self.export_gdsii)
-        self.btn_export_gds.pack(fill=tk.X, pady=(0, 6))
-
-        self.btn_export = tk.Button(out, text="Export CSV",
-                                    bg="#059669", fg="white", font=("Inter", 12, "bold"),
-                                    relief="raised", activebackground="#047857",
-                                    command=self.generate_csv_file)
-        self.btn_export.pack(fill=tk.X, pady=(0, 6))
-
-        self.btn_estimate = tk.Button(out, text="Estimate writing time (realistic defaults; no fab info)",
-                                      bg="#6b7280", fg="white", font=("Inter", 12, "bold"),
-                                      relief="raised", activebackground="#4b5563",
-                                      command=self._estimate_time)
-        self.btn_estimate.pack(fill=tk.X)
-
-        self.status = tk.StringVar(value="")
-        ttk.Label(out, textvariable=self.status, wraplength=380).pack(anchor="w", pady=(8, 0))
-
+        # -------- Right Panel Matplotlib Figure --------
         plt.style.use("dark_background")
-        self.fig = plt.figure(figsize=(12.5, 8.0), facecolor="#111827")
+        mpl.rcParams.update({
+            "figure.facecolor": "#222b31", # from ttkbootstrap superhero theme
+            "axes.facecolor": "#222b31",
+            "text.color": "white",
+            "axes.labelcolor": "lightgray",
+            "xtick.color": "lightgray",
+            "ytick.color": "lightgray",
+        })
+        self.fig = plt.figure(figsize=(12.5, 8.0))
         self.canvas = FigureCanvasTkAgg(self.fig, master=right)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        self._update_info_warn()
+        self._on_any_change(from_init=True)
+        self.update_plots() # Generate initial plots on startup
 
-    # ---------- Build all controls ----------
+    def _create_control_group(self, parent, title):
+        frame = ttk.Labelframe(parent, text=title, bootstyle=PRIMARY, padding=(10, 5))
+        frame.pack(fill=tk.X, expand=True, padx=5, pady=(0, 10))
+        return frame
+
+    def _add_option_menu(self, parent, label, var, choices, callback):
+        ttk.Label(parent, text=label).pack(anchor="w", pady=(5, 2))
+        menu = ttk.OptionMenu(parent, var, var.get(), *choices, command=callback, bootstyle=SECONDARY)
+        menu.pack(fill=tk.X, expand=True)
+
     def _build_all_controls(self, parent):
-        def add_label(txt): ttk.Label(parent, text=txt).pack(anchor="w", pady=(10, 2))
-
-        add_label("1) Wavelength λ")
+        # --- Optical Setup ---
+        optical_frame = self._create_control_group(parent, "Optical Setup")
         self.var_wl = tk.StringVar(value="λ = 9 μm")
-        ttk.OptionMenu(parent, self.var_wl, self.var_wl.get(),
-                       *choice_map(WL_CHOICES).keys(),
-                       command=lambda *_: self._on_any_change()).pack(fill=tk.X)
+        self._add_option_menu(optical_frame, "Wavelength λ", self.var_wl, choice_map(WL_CHOICES).keys(), self._on_any_change)
 
-        add_label("2) Substrate / material")
-        self.var_sub = tk.StringVar(value=list(MATERIALS.keys())[0])
-        ttk.OptionMenu(parent, self.var_sub, self.var_sub.get(), *MATERIALS.keys(),
-                       command=lambda *_: self._on_any_change()).pack(fill=tk.X)
-
-        add_label("3) Resin + nanoparticle (AM material)")
-        self.var_resin = tk.StringVar(value=list(RESINS.keys())[0])
-        ttk.OptionMenu(parent, self.var_resin, self.var_resin.get(), *RESINS.keys(),
-                       command=lambda *_: self._on_any_change()).pack(fill=tk.X)
-
-        add_label("3b) Select meta-atom geometry (Frustum N=8–12, or Cylinder)")
-        self.var_shape = tk.StringVar(value="Frustum (N-gon)")
-        ttk.OptionMenu(parent, self.var_shape, self.var_shape.get(),
-                       "Frustum (N-gon)", "Cylinder",
-                       command=lambda *_: self._on_any_change()).pack(fill=tk.X)
-        self.var_sides = tk.IntVar(value=10)
-        self.sides_scale = tk.Scale(parent, from_=8, to=12, orient="horizontal",
-                                    showvalue=True, resolution=1, length=320,
-                                    variable=self.var_sides, command=lambda *_: self._on_any_change())
-        self.sides_scale.pack(fill=tk.X)
-
-        add_label("4) Lens aperture (diameter)")
-        self.var_D = tk.StringVar(value="1.5 mm")
-        ttk.OptionMenu(parent, self.var_D, self.var_D.get(), *choice_map(DIAM_CHOICES).keys(),
-                       command=lambda *_: self._on_any_change()).pack(fill=tk.X)
-
-        add_label("4b) Lattice pitch p (µm)")
-        self.var_pitch = tk.StringVar(value="9 µm")
-        ttk.OptionMenu(parent, self.var_pitch, self.var_pitch.get(), *choice_map(PITCH_CHOICES).keys(),
-                       command=lambda *_: self._on_any_change()).pack(fill=tk.X)
-
-        add_label("5) Working distance (≈ focal length)")
         self.var_f = tk.StringVar(value="25 mm")
-        ttk.OptionMenu(parent, self.var_f, self.var_f.get(), *choice_map(WD_CHOICES).keys(),
-                       command=lambda *_: self._on_any_change()).pack(fill=tk.X)
+        self._add_option_menu(optical_frame, "Working Distance (≈ Focal Length)", self.var_f, choice_map(WD_CHOICES).keys(), self._on_any_change)
 
-        add_label("6) Expected beam focusing performance (% of diffraction limit)")
+        # --- Lens Geometry & Materials ---
+        geom_frame = self._create_control_group(parent, "Lens Geometry & Materials")
+        self.var_D = tk.StringVar(value="1.5 mm")
+        self._add_option_menu(geom_frame, "Lens Aperture (Diameter)", self.var_D, choice_map(DIAM_CHOICES).keys(), self._on_any_change)
+
+        self.var_pitch = tk.StringVar(value="9 µm")
+        self._add_option_menu(geom_frame, "Lattice Pitch p (µm)", self.var_pitch, choice_map(PITCH_CHOICES).keys(), self._on_any_change)
+
+        self.var_sub = tk.StringVar(value=list(MATERIALS.keys())[0])
+        self._add_option_menu(geom_frame, "Substrate Material", self.var_sub, MATERIALS.keys(), self._on_any_change)
+
+        # --- Meta-Atom Geometry ---
+        atom_frame = self._create_control_group(parent, "Meta-Atom Geometry")
+        self.var_shape = tk.StringVar(value="Frustum (N-gon)")
+        self._add_option_menu(atom_frame, "Shape", self.var_shape, ["Frustum (N-gon)", "Cylinder"], self._on_any_change)
+
+        # --- N-gon Sides Slider with Value Display (FIXED for integers) ---
+        self.var_sides = tk.IntVar(value=10)
+        ttk.Label(atom_frame, text="Sides (N) for Frustum").pack(anchor="w", pady=(5, 2))
+
+        sides_frame = ttk.Frame(atom_frame)
+        sides_frame.pack(fill=X, expand=True)
+
+        sides_value_label = ttk.Label(sides_frame, textvariable=self.var_sides, font="-weight bold", width=2)
+        sides_value_label.pack(side=RIGHT, padx=(5, 0))
+
+        self.sides_scale = ttk.Scale(sides_frame, from_=8, to=12, variable=self.var_sides, command=self._on_sides_scale_change)
+        self.sides_scale.pack(fill=X, expand=True)
+
+        # --- Manufacturing & Performance ---
+        mfg_frame = self._create_control_group(parent, "Manufacturing & Performance")
+        self.var_method = tk.StringVar(value=METHOD_LIST[1])
+        self._add_option_menu(mfg_frame, "Manufacturing Method", self.var_method, METHODS.keys(), self._on_any_change)
+
+        self.var_resin = tk.StringVar(value=list(RESINS.keys())[0])
+        self._add_option_menu(mfg_frame, "Resin + Nanoparticle (AM Material)", self.var_resin, RESINS.keys(), self._on_any_change)
+
+        self.compat_lbl = ttk.Label(mfg_frame, text="")
+        self.compat_lbl.pack(anchor="w", pady=(6, 0))
+
+        # --- Performance Slider with Value Display ---
         self.var_perf = tk.IntVar(value=80)
-        tk.Scale(parent, from_=20, to=100, orient="horizontal", showvalue=True,
-                 resolution=1, length=320, variable=self.var_perf,
-                 command=lambda *_: self._on_any_change()).pack(fill=tk.X)
+        ttk.Label(mfg_frame, text="Expected Focusing Performance (%)").pack(anchor="w", pady=(8, 2))
 
-        add_label("7) Manufacturing method")
-        self.var_method = tk.StringVar(value=list(METHODS.keys())[1])  # fs two-photon
-        ttk.OptionMenu(parent, self.var_method, self.var_method.get(), *METHODS.keys(),
-                       command=lambda *_: self._on_any_change()).pack(fill=tk.X)
+        perf_frame = ttk.Frame(mfg_frame)
+        perf_frame.pack(fill=X, expand=True)
 
-        self.compat_lbl = ttk.Label(parent, text="", foreground="#c7d2fe")
-        self.compat_lbl.pack(anchor="w", pady=(4, 0))
-        self._on_any_change()
+        perf_value_label = ttk.Label(perf_frame, textvariable=self.var_perf, font="-weight bold", width=4)
+        perf_value_label.pack(side=RIGHT, padx=(5, 0))
 
-    # ---------- Respond to any change ----------
-    def _on_any_change(self):
-        wl_map = choice_map(WL_CHOICES)
-        D_map  = choice_map(DIAM_CHOICES)
-        p_map  = choice_map(PITCH_CHOICES)
-        f_map  = choice_map(WD_CHOICES)
+        perf_scale = ttk.Scale(perf_frame, from_=20, to=100, variable=self.var_perf, command=self._on_perf_scale_change)
+        perf_scale.pack(fill=X, expand=True)
 
-        self.config["wavelength_um"]  = wl_map[self.var_wl.get()]
-        self.config["substrate"]      = self.var_sub.get()
-        self.config["resin"]          = self.var_resin.get()
-        self.config["shape"]          = "frustum" if self.var_shape.get().lower().startswith("frustum") else "cylinder"
-        self.config["sides"]          = int(self.var_sides.get())
-        self.sides_scale.configure(state=("normal" if self.config["shape"] == "frustum" else "disabled"))
+        # --- Output / Actions ---
+        out_frame = self._create_control_group(parent, "Actions")
+        self.btn_generate = ttk.Button(out_frame, text="Generate Plots", command=self.update_plots, bootstyle=SUCCESS)
+        self.btn_generate.pack(fill=tk.X, pady=(5, 8))
 
-        self.config["lens_diameter"]  = D_map[self.var_D.get()]
-        self.config["pitch_um"]       = p_map[self.var_pitch.get()]
-        self.config["working_distance"]= f_map[self.var_f.get()]
-        self.config["perf_pct"]       = float(self.var_perf.get())
-        self.config["method"]         = self.var_method.get()
+        # Button grid
+        btn_grid = ttk.Frame(out_frame)
+        btn_grid.pack(fill=tk.X)
+        btn_grid.columnconfigure((0, 1), weight=1)
+
+        btn_style = "primary-outline"
+        btn_pad = {'padx': 2, 'pady': 2}
+        ttk.Button(btn_grid, text="Interactive Layout", command=self._open_vector_layout_viewer, bootstyle=btn_style).grid(row=0, column=0, sticky="ew", **btn_pad)
+        ttk.Button(btn_grid, text="3D CAD View", command=self._open_3d_cad_plotly_full, bootstyle=btn_style).grid(row=0, column=1, sticky="ew", **btn_pad)
+        ttk.Button(btn_grid, text="Export GDSII", command=self.export_gdsii, bootstyle=btn_style).grid(row=1, column=0, sticky="ew", **btn_pad)
+        ttk.Button(btn_grid, text="Export CSV", command=self.generate_csv_file, bootstyle=btn_style).grid(row=1, column=1, sticky="ew", **btn_pad)
+
+        self.btn_estimate = ttk.Button(out_frame, text="Estimate Writing Time", command=self._estimate_time, bootstyle="secondary-outline")
+        self.btn_estimate.pack(fill=tk.X, pady=(8, 0))
+
+        self.status = tk.StringVar(value="Ready.")
+        ttk.Label(out_frame, textvariable=self.status, wraplength=400).pack(anchor="w", pady=(8, 0))
+
+    def _mark_plots_stale(self):
+        self.btn_generate.config(text="Update Plots (stale)", bootstyle=(SUCCESS, OUTLINE))
+
+    def _mark_plots_fresh(self):
+        self.btn_generate.config(text="Generate Plots", bootstyle=SUCCESS)
+        self.root.update_idletasks()
+
+    def _on_any_change(self, *args, from_init=False):
+        # --- Update self.config dictionary ---
+        self.config["wavelength_um"] = choice_map(WL_CHOICES)[self.var_wl.get()]
+        self.config["substrate"] = self.var_sub.get()
+        self.config["resin"] = self.var_resin.get()
+        self.config["shape"] = "frustum" if self.var_shape.get().lower().startswith("frustum") else "cylinder"
+        self.config["sides"] = int(self.var_sides.get())
+        self.config["lens_diameter"] = choice_map(DIAM_CHOICES)[self.var_D.get()]
+        self.config["pitch_um"] = choice_map(PITCH_CHOICES)[self.var_pitch.get()]
+        self.config["working_distance"] = choice_map(WD_CHOICES)[self.var_f.get()]
+        self.config["perf_pct"] = float(self.var_perf.get())
+        self.config["method"] = self.var_method.get()
+
+        # --- Update UI state based on config ---
+        self.sides_scale.config(state=("normal" if self.config["shape"] == "frustum" else "disabled"))
 
         self.current_layout_data = {}
         self._layout_key = None
+        if not from_init: # Don't mark as stale on first run
+            self._mark_plots_stale()
 
         self._update_info_warn()
         self._update_compatibility_label()
 
     def _update_compatibility_label(self):
-        method = self.config["method"]; resin = self.config["resin"]
-        ok = resin in METHODS[method]["compatible_resins"]
-        msg = f"Compatibility: {'OK' if ok else 'NOT COMPATIBLE'}  —  method '{method}' vs AM material '{resin}'"
-        self.compat_lbl.config(text=msg, foreground=("#34d399" if ok else "#fca5a5"))
+        method, resin = self.config["method"], self.config["resin"]
+        is_ok = resin in METHODS[method]["compatible_resins"]
+        msg = f"Method/Resin: {'OK' if is_ok else 'INCOMPATIBLE'}"
+        self.compat_lbl.config(text=msg, bootstyle=(SUCCESS if is_ok else DANGER))
 
     def _update_info_warn(self):
         sub = self.config["substrate"]
-        rng = MATERIALS[sub]["lambda_range_um"]; n = MATERIALS[sub]["n"]
-        D = self.config["lens_diameter"]; f = self.config["working_distance"]
-        na = (D*1000.0) / (2.0 * f * 1000.0)  # D(mm)->um cancels; keep readable
-        extra = ""
-        if self.config["method"] == "fs two-photon AM":
-            build = 100.0  # µm typical
-            curr = D * 1000.0  # mm -> µm
-            extra = f" | fs two-photon AM build-size limit ≈ {build} µm; current D = {curr:.0f} µm"
-        self.info.set(f"{sub}: n≈{n:.2f}, usable λ ≈ {rng[0]}–{rng[1]} μm.  NA≈{na:.3f}{extra}")
+        rng, n = MATERIALS[sub]["lambda_range_um"], MATERIALS[sub]["n"]
+        D, f = self.config["lens_diameter"], self.config["working_distance"]
+        na = (D / (2.0 * f))
+        self.info.set(f"Substrate {sub}: n≈{n:.2f} ({rng[0]}-{rng[1]} μm). Current Lens NA ≈ {na:.3f}.")
+
+        warn_msg = ""
         if na < 0.01:
-            self.warn.set("Warning: NA < 0.01 → very weak focusing.")
+            warn_msg = "Warning: NA < 0.01 indicates very weak focusing."
         elif na > 0.90:
-            self.warn.set("Warning: NA > 0.9 → performance likely degraded.")
-        else:
-            self.warn.set("")
+            warn_msg = "Warning: NA > 0.9 may result in degraded performance."
+        self.warn.set(warn_msg)
 
     # ---------- Core compute ----------
     def _current_cache_key(self): return tuple(self.config.get(k) for k in LAYOUT_KEYS)
 
     def _compute_layout(self):
+        self.status.set("Computing layout...")
+        self.root.update_idletasks()
         radius_um = (self.config["lens_diameter"] / 2.0) * 1000.0
         pitch = float(self.config["pitch_um"])
         xs = np.arange(-radius_um, radius_um + 1e-9, pitch)
@@ -426,8 +418,8 @@ class PDK_App:
         if active_d.size:
             max_d_um = float(active_d.max()) * 1e-3
             if pitch - max_d_um < 0:
-                self.warn.set((self.warn.get() + " | " if self.warn.get() else "") +
-                              f"DRC: pillars overlap (pitch {pitch:.2f} µm < max d {max_d_um:.2f} µm).")
+                drc_warn = f"DRC Fail: Pillars overlap (pitch {pitch:.2f} < max ø {max_d_um:.2f} µm)."
+                self.warn.set((self.warn.get() + " | " if self.warn.get() else "") + drc_warn)
         return True
 
     def _ensure_layout(self):
@@ -435,61 +427,64 @@ class PDK_App:
             return self._compute_layout()
         return True
 
-    # ---------- Height/phase helpers ----------
+    # ---------- Height/phase helpers & ttk helpers ----------
     def _h_2pi_um(self):
         """Physically-informed 2π height (tunable)."""
-        lam   = float(self.config["wavelength_um"])          # µm
+        lam = float(self.config["wavelength_um"])
         n_eff = RESINS[self.config["resin"]]["n_eff"]
-        n_env = 1.0  # air; adjust if using immersion/cladding
+        n_env = 1.0  # air
         delta_n = max(1e-3, abs(n_eff - n_env))
-        k_shape  = 1.15 if self.config.get("shape","frustum")=="frustum" else 1.0
-        k_method = METHODS[self.config["method"]].get("h2pi_scale", 1.0)  # <-- FIXED indexing
-        k_perf   = max(0.6, min(1.2, self.config["perf_pct"]/80.0))
+        k_shape = 1.15 if self.config.get("shape","frustum")=="frustum" else 1.0
+        k_method = METHODS[self.config["method"]].get("h2pi_scale", 1.0)
+        k_perf = max(0.6, min(1.2, self.config["perf_pct"]/80.0))
         return (lam / delta_n) * k_shape * k_method * k_perf
 
     def _pillar_heights_um(self, wrapped_phase):
         """Map wrapped phase [0..2π] → pillar height using _h_2pi_um()."""
         h2pi = self._h_2pi_um()
         arr = np.asarray(wrapped_phase, dtype=float)
-        out = np.where(np.isfinite(arr), (arr / (2.0 * np.pi)) * h2pi, np.nan)
-        return out
+        return np.where(np.isfinite(arr), (arr / (2.0 * np.pi)) * h2pi, np.nan)
+    
+    def _on_perf_scale_change(self, value):
+        """Callback to round the performance slider's value to the nearest integer."""
+        rounded_value = int(round(float(value)))
+        self.var_perf.set(rounded_value)
+        self._on_any_change()
+
+    def _on_sides_scale_change(self, value):
+        """Callback to round the N-gon sides slider's value to the nearest integer."""
+        rounded_value = int(round(float(value)))
+        self.var_sides.set(rounded_value)
+        self._on_any_change()
+
+    def _on_viewer_scale_change(self, value, var):
+        """Callback to round the viewer's slider values to the nearest integer."""
+        var.set(int(round(float(value))))
 
     # ---------- Plots ----------
     def update_plots(self):
         if not self._ensure_layout(): return
         d = self.current_layout_data
-
         self.fig.clear()
         (self.ax1, self.ax2), (self.ax3, self.ax4) = self.fig.subplots(2, 2)
-        ax1, ax2, ax3, ax4 = self.ax1, self.ax2, self.ax3, self.ax4
 
-        for ax in (ax1, ax2, ax3, ax4):
-            ax.set_facecolor("#111827")
+        self._draw_img_um(self.ax1, d["x"], d["y"], d["phase_ideal"], d["active_mask"], "Ideal Phase", cmap="twilight")
 
-        # 1) IDEAL PHASE (wrapped)
-        self._draw_img_um(ax1, d["x"], d["y"], d["phase_ideal"], d["active_mask"],
-                          "Ideal phase (wrapped)", cmap="twilight")
-        # 2) REALIZED PHASE (wrapped, finer viz)
-        realized = d["phase_realized"]
-        realized_fine = self._upsample_nearest(realized, self.REALIZED_UPSAMPLE)
-        self._draw_img_um(ax2, d["x"], d["y"], realized_fine,  # extent still original; imshow handles it
-                          np.repeat(np.repeat(d["active_mask"], self.REALIZED_UPSAMPLE, 0),
-                                    self.REALIZED_UPSAMPLE, 1),
-                          "Realized phase (wrapped, finer viz)", cmap="twilight")
+        realized_fine = self._upsample_nearest(d["phase_realized"], self.REALIZED_UPSAMPLE)
+        mask_fine = np.repeat(np.repeat(d["active_mask"], self.REALIZED_UPSAMPLE, 0), self.REALIZED_UPSAMPLE, 1)
+        self._draw_img_um(self.ax2, d["x"], d["y"], realized_fine, mask_fine, "Realized Phase (plug in data)", cmap="twilight")
 
-        # 3) ATOM HEIGHT MAP (µm) from realized phase
         h_um = self._pillar_heights_um(d["phase_realized"])
-        self._draw_img_um(ax3, d["x"], d["y"], h_um, d["active_mask"],
-                          "Atom height map (µm)", cmap="viridis")
+        self._draw_img_um(self.ax3, d["x"], d["y"], h_um, d["active_mask"], "Atom Height Map (µm)", cmap="viridis")
 
-        # 4) BASE DIAMETER MAP (µm)
         d_um = np.where(d["diameters"] > 0, d["diameters"] * 1e-3, np.nan)  # nm -> µm
-        self._draw_img_um(ax4, d["x"], d["y"], d_um, d["active_mask"],
-                          "Atom base diameter map (µm)", cmap="turbo")
+        self._draw_img_um(self.ax4, d["x"], d["y"], d_um, d["active_mask"], "Atom Base Diameter (µm)", cmap="turbo")
 
         self.fig.tight_layout(pad=2.0)
         self.canvas.draw()
-        self.status.set("Ideal + realized phase maps generated (finer viz enabled for realized).")
+        self.status.set("Plots updated successfully.")
+        self._mark_plots_fresh()
+
 
     def _upsample_nearest(self, arr, factor):
         if factor <= 1 or arr is None:
@@ -499,48 +494,73 @@ class PDK_App:
     def _draw_img_um(self, ax, x, y, data, mask, title, cmap="viridis"):
         arr = np.where(mask, data, np.nan)
         finite = np.isfinite(arr)
-        if np.any(finite):
-            vmin = float(np.nanmin(arr))
-            vmax = float(np.nanmax(arr))
-            if vmin == vmax:  # avoid singular color range
-                vmin, vmax = vmin - 1e-6, vmax + 1e-6
-        else:
-            vmin, vmax = 0.0, 1.0
+        vmin, vmax = (np.nanmin(arr), np.nanmax(arr)) if np.any(finite) else (0.0, 1.0)
+        if vmin == vmax:
+            vmin, vmax = vmin - 1e-6, vmax + 1e-6
 
         im = ax.imshow(arr, extent=[x.min(), x.max(), y.min(), y.max()],
                        origin="lower", cmap=cmap, vmin=vmin, vmax=vmax, interpolation="nearest")
-        ax.set_title(title)
-        ax.set_xlabel("x (µm)")
-        ax.set_ylabel("y (µm)")
+        ax.set_title(title, fontsize=10)
+        ax.set_xlabel("x (µm)", fontsize=9)
+        ax.set_ylabel("y (µm)", fontsize=9)
         ax.set_aspect("equal", adjustable="box")
         cbar = self.fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        # Small, readable ticks
-        cbar.ax.tick_params(labelsize=9)
+        cbar.ax.tick_params(labelsize=8)
 
+    # ---------- Interactive vector viewer (view-culling) ----------
     # ---------- Interactive vector viewer (view-culling) ----------
     def _open_vector_layout_viewer(self):
         if not self._ensure_layout(): return
         data = self.current_layout_data
-        top = tk.Toplevel(self.root); top.title("Interactive Lens Layout — Vector Pillars (μm units; view-culling)")
 
-        controls = tk.Frame(top); controls.pack(side=tk.TOP, fill=tk.X)
-        tk.Label(controls, text="Decimation (stride):", font=("Inter", 12)).pack(side=tk.LEFT, padx=(8, 4))
+        # Use ttk.Toplevel to inherit the main window's theme
+        top = ttk.Toplevel(self.root)
+        top.title("Interactive Lens Layout — Vector Pillars")
+
+        # Get the theme's background color for Matplotlib
+        theme_bg = ttk.Style().lookup('TFrame', 'background')
+
+        # --- Top control panel ---
+        controls = ttk.Frame(top, padding=(10, 10))
+        controls.pack(side=tk.TOP, fill=tk.X)
+        controls.columnconfigure((1, 3), weight=1) # Make scales expandable
+
+        # Stride slider
+        ttk.Label(controls, text="Decimation (stride):").grid(row=0, column=0, padx=(0, 5), sticky='w')
         stride_var = tk.IntVar(value=2)
-        tk.Scale(controls, from_=1, to=20, orient="horizontal", variable=stride_var,
-                 showvalue=True, length=240, command=lambda *_: schedule_redraw()).pack(side=tk.LEFT, padx=(0, 12))
-        tk.Label(controls, text="Min diameter (nm):", font=("Inter", 12)).pack(side=tk.LEFT)
+        ttk.Scale(controls, from_=1, to=20, variable=stride_var,
+                command=lambda v: self._on_viewer_scale_change(v, stride_var)).grid(row=0, column=1, sticky='ew')
+        ttk.Label(controls, textvariable=stride_var, width=3).grid(row=0, column=2, padx=(5, 15))
+
+        # Min diameter slider
+        ttk.Label(controls, text="Min diameter (nm):").grid(row=0, column=3, padx=(0, 5), sticky='w')
         mind_var = tk.IntVar(value=20)
-        tk.Scale(controls, from_=10, to=2000, orient="horizontal", variable=mind_var,
-                 showvalue=True, length=240, command=lambda *_: schedule_redraw()).pack(side=tk.LEFT, padx=(0, 12))
-        count_lbl = tk.Label(controls, text="", font=("Inter", 12)); count_lbl.pack(side=tk.RIGHT, padx=8)
+        ttk.Scale(controls, from_=10, to=2000, variable=mind_var,
+                command=lambda v: self._on_viewer_scale_change(v, mind_var)).grid(row=0, column=4, sticky='ew')
+        ttk.Label(controls, textvariable=mind_var, width=5).grid(row=0, column=5, padx=5)
 
-        fig = plt.figure(figsize=(8.3, 8.3), facecolor="#111827")
-        canvas = FigureCanvasTkAgg(fig, master=top); canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        toolbar = NavigationToolbar2Tk(canvas, top, pack_toolbar=False); toolbar.update(); toolbar.pack(side=tk.BOTTOM, fill=tk.X)
-        ax = fig.add_subplot(111); ax.set_aspect("equal", adjustable="box"); ax.set_facecolor("#111827")
-        ax.set_xlabel("X (μm)"); ax.set_ylabel("Y (μm)"); ax.set_title("Vector Pillar Layout (view-culling)")
+        count_lbl = ttk.Label(controls, text="", anchor=E)
+        count_lbl.grid(row=1, column=0, columnspan=6, sticky='ew', pady=(5,0))
 
-        x = data["x"]; y = data["y"]; dnm = data["diameters"]; mask = dnm > 0.0
+        # --- Matplotlib Figure and Toolbar ---
+        fig_frame = ttk.Frame(top)
+        fig_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0,10))
+
+        fig = plt.figure(figsize=(8.3, 8.3), facecolor=theme_bg)
+        canvas = FigureCanvasTkAgg(fig, master=fig_frame)
+        canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        toolbar = NavigationToolbar2Tk(canvas, fig_frame, pack_toolbar=False)
+        toolbar.update()
+        toolbar.pack(side=tk.BOTTOM, fill=tk.X)
+
+        ax = fig.add_subplot(111)
+        ax.set_facecolor(theme_bg)
+        ax.set_xlabel("X (μm)")
+        ax.set_ylabel("Y (μm)")
+        ax.set_title("Vector Pillar Layout")
+
+        x, y, dnm, mask = data["x"], data["y"], data["diameters"], data["diameters"] > 0.0
         R = (self.config["lens_diameter"] / 2) * 1000.0
         after_id = None
 
@@ -552,14 +572,17 @@ class PDK_App:
             after_id = top.after(60, draw_visible)
 
         def draw_visible():
-            x0, x1 = ax.get_xlim(); y0, y1 = ax.get_ylim()
-            s = max(1, int(stride_var.get())); min_nm = max(1, int(mind_var.get()))
-            xs = x[::s, ::s]; ys = y[::s, ::s]; ds = dnm[::s, ::s]; mk = mask[::s, ::s]
+            x0, x1 = ax.get_xlim()
+            y0, y1 = ax.get_ylim()
+            s = max(1, int(stride_var.get()))
+            min_nm = max(1, int(mind_var.get()))
+            xs, ys, ds, mk = x[::s, ::s], y[::s, ::s], dnm[::s, ::s], mask[::s, ::s]
             in_view = mk & (ds >= min_nm) & (xs >= x0) & (xs <= x1) & (ys >= y0) & (ys <= y1)
 
             ax.clear()
-            ax.set_aspect("equal", adjustable="box"); ax.set_facecolor("#111827")
-            ax.set_xlabel("X (μm)"); ax.set_ylabel("Y (μm)"); ax.set_title("Vector Pillar Layout (view-culling)")
+            ax.set_facecolor(theme_bg)
+            ax.set_xlabel("X (μm)"); ax.set_ylabel("Y (μm)")
+            ax.set_title("Vector Pillar Layout")
             ax.set_xlim(x0, x1); ax.set_ylim(y0, y1)
 
             outline = Circle((0.0, 0.0), R, fill=False, lw=1.0, ec="white", alpha=0.7)
@@ -568,33 +591,37 @@ class PDK_App:
             count = 0
             shape = self.config.get("shape", "frustum")
             if np.any(in_view):
-                xs_v = xs[in_view]; ys_v = ys[in_view]; ds_v = ds[in_view]
+                xs_v, ys_v, ds_v = xs[in_view], ys[in_view], ds[in_view]
                 radii_um = 0.5 * ds_v * 1e-3
                 if shape == "frustum":
                     N = int(self.config.get("sides", 10))
-                    patches = [RegularPolygon((float(cx), float(cy)), N, radius=float(r), orientation=0.0)
-                               for cx, cy, r in zip(xs_v, ys_v, radii_um)]
+                    patches = [RegularPolygon((float(cx), float(cy)), N, radius=float(r))
+                            for cx, cy, r in zip(xs_v, ys_v, radii_um)]
                 else:
                     patches = [Circle((float(cx), float(cy)), float(r))
-                               for cx, cy, r in zip(xs_v, ys_v, radii_um)]
-                coll = PatchCollection(patches, facecolor="#ff5470", edgecolor="none", alpha=0.85, antialiased=False)
-                ax.add_collection(coll); count = len(patches)
+                            for cx, cy, r in zip(xs_v, ys_v, radii_um)]
+                coll = PatchCollection(patches, facecolor="#ff5470", edgecolor="none", alpha=0.85)
+                ax.add_collection(coll)
+                count = len(patches)
             else:
-                ax.text(0.5, 0.5, "No pillars in view\n(zoom/pan or lower min d)", color="w",
-                        ha="center", va="center", transform=ax.transAxes, alpha=0.8)
+                ax.text(0.5, 0.5, "No pillars in view\n(zoom/pan or adjust controls)",
+                        color="w", ha="center", va="center", transform=ax.transAxes, alpha=0.8)
 
-            count_lbl.config(text=f"Pillars shown: {count:,}  (stride {s}, min d {min_nm} nm)")
+            count_lbl.config(text=f"Pillars shown: {count:,} (decimation {s}x, min ø {min_nm} nm)")
             canvas.draw_idle()
 
-        ax.callbacks.connect('xlim_changed', lambda _ax: schedule_redraw())
-        ax.callbacks.connect('ylim_changed', lambda _ax: schedule_redraw())
+        ax.callbacks.connect('xlim_changed', schedule_redraw)
+        ax.callbacks.connect('ylim_changed', schedule_redraw)
         canvas.mpl_connect('scroll_event', schedule_redraw)
         canvas.mpl_connect('button_release_event', schedule_redraw)
 
-        f = 0.10
-        ax.set_xlim(-R * f, R * f); ax.set_ylim(-R * f, R * f)
-        draw_visible()
+        # Set initial view to the full lens diameter with a 5% margin
+        margin = 1.05
+        ax.set_xlim(-R * margin, R * margin)
+        ax.set_ylim(-R * margin, R * margin)
 
+        # Manually call the redraw function once to populate the initial view
+        draw_visible()
     # ---------- Estimate writing time ----------
     def _estimate_time(self):
         if not self._ensure_layout(): return
@@ -895,6 +922,7 @@ class PDK_App:
                     xaxis=dict(range=[cx - w, cx + w], backgroundcolor="#111827", showgrid=False, zeroline=False),
                     yaxis=dict(range=[cy - w, cy + w], backgroundcolor="#111827", showgrid=False, zeroline=False),
                     zaxis=dict(range=[0, H2pi], backgroundcolor="#111827", showgrid=True, zeroline=False),
+                    aspectmode="auto",
                     camera=dict(eye=dict(x=2.2, y=1.8, z=1.4))  # angled close-up
                 ))
             )
@@ -906,9 +934,9 @@ class PDK_App:
         # initial render
         render()
 
-
 # ----------------------------- Main -----------------------------
 if __name__ == "__main__":
-    root = tk.Tk()
+    # Use ttkbootstrap Window for automatic theming
+    root = ttk.Window(themename="superhero")
     app = PDK_App(root)
     root.mainloop()
