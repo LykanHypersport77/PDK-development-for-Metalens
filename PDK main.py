@@ -87,6 +87,69 @@ def create_inverse_interpolators(phase_lut, fab_lut):
     return phase_to_dia, dia_to_phase, dia_to_fab
 
 # ----------------------------- Helpers -----------------------------
+class VScrollFrame(tk.Frame):
+    """A vertical scrollable frame that plays nicely with Matplotlib:
+       - Mousewheel scroll only when the pointer is over the left column.
+       - Auto-resizes inner width to the canvas.
+    """
+    def __init__(self, parent, *, bg="#1f2937", width=420, **kwargs):
+        super().__init__(parent, bg=bg, **kwargs)
+        self._bg = bg
+        self._wheelbound = False
+
+        # Canvas + vertical scrollbar
+        self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0, width=width)
+        self.vsb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.vsb.set)
+
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.vsb.pack(side="right", fill="y")
+
+        # Inner frame that will hold your controls
+        self.body = tk.Frame(self.canvas, bg=bg)
+        self._win = self.canvas.create_window((0, 0), window=self.body, anchor="nw")
+
+        # Keep scrollregion and width in sync
+        self.body.bind("<Configure>", self._on_body_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+
+        # Mouse wheel handling — bind only when hovered
+        self.body.bind("<Enter>", self._bind_mousewheel)
+        self.body.bind("<Leave>", self._unbind_mousewheel)
+
+    def _on_body_configure(self, _evt):
+        # Update scrollable region
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_canvas_configure(self, evt):
+        # Make inner frame match canvas width
+        self.canvas.itemconfigure(self._win, width=evt.width)
+
+    # Windows / macOS wheel
+    def _on_wheel(self, evt):
+        self.canvas.yview_scroll(int(-evt.delta/120), "units")
+
+    # Linux wheel
+    def _on_wheel_up(self, _evt):   self.canvas.yview_scroll(-1, "units")
+    def _on_wheel_down(self, _evt): self.canvas.yview_scroll(+1, "units")
+
+    def _bind_mousewheel(self, _evt):
+        if self._wheelbound: return
+        self.canvas.bind_all("<MouseWheel>", self._on_wheel)
+        self.canvas.bind_all("<Button-4>", self._on_wheel_up)
+        self.canvas.bind_all("<Button-5>", self._on_wheel_down)
+        self._wheelbound = True
+
+    def _unbind_mousewheel(self, _evt):
+        if not self._wheelbound: return
+        self.canvas.unbind_all("<MouseWheel>")
+        self.canvas.unbind_all("<Button-4>")
+        self.canvas.unbind_all("<Button-5>")
+        self._wheelbound = False
+
+    def scroll_to_top(self):
+        self.canvas.yview_moveto(0.0)
+
 def choice_map(pairs): return {a: b for a, b in pairs}
 
 WL_CHOICES   = [("λ = 9 μm", 9.0), ("λ = 10 μm", 10.0)]
@@ -110,8 +173,7 @@ class PDK_App:
         self.root.title("Metalens PDK — WIP")
         self.root.configure(bg="#111827")
 
-        # Rendering preference: make realized map look smoother (no new values introduced)
-        self.REALIZED_UPSAMPLE = 3  # 1 = original, 2/3/4 = finer visualization
+        self.REALIZED_UPSAMPLE = 3  
 
         # -------- Bigger fonts --------
         for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont", "TkTooltipFont"):
@@ -119,10 +181,10 @@ class PDK_App:
             except Exception: pass
 
         style = ttk.Style()
-        style.configure("TLabel", background="#1f2937", foreground="white", font=("Inter", 12))
-        style.configure("TMenubutton", background="#374151", foreground="white", font=("Inter", 12))
-        style.configure("TButton", background="#374151", foreground="white", font=("Inter", 12))
-        style.configure("Header.TLabel", background="#1f2937", foreground="#e5e7eb", font=("Inter", 14, "bold"))
+        style.configure("TLabel", background="#1f2937", foreground="white", font=("Inter", 13))
+        style.configure("TMenubutton", background="#374151", foreground="white", font=("Inter", 13))
+        style.configure("TButton", background="#374151", foreground="white", font=("Inter", 13))
+        style.configure("Header.TLabel", background="#1f2937", foreground="#e5e7eb", font=("Inter", 15, "bold"))
 
         # -------- Defaults (Frustum) --------
         self.config = {
@@ -141,7 +203,11 @@ class PDK_App:
         self._layout_key = None
 
         # -------- Frames --------
-        left = tk.Frame(root, bg="#1f2937", padx=18, pady=18); left.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
+        left_sf = VScrollFrame(root, bg="#1f2937", width=600)
+        left_sf.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
+        left = left_sf.body  # <- use this 'left' exactly as before for all your widgets
+        left_sf.scroll_to_top()
+
         right = tk.Frame(root, bg="#111827"); right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         ttk.Label(left, text="Design Controls", style="Header.TLabel").pack(anchor="w", pady=(0, 8))
@@ -627,16 +693,18 @@ class PDK_App:
 
     # ---------- 3D CAD (Plotly/WebGL) — FULL LENS, minimal controls ----------
     def _open_3d_cad_plotly_full(self):
-        """Full-lens 3D with capped frustums colored by realized phase (rings visible).
-        Controls: Stride + Min diameter. Geometry/sides come from main inputs."""
+        """Full-lens 3D with capped frustums colored by realized phase.
+        Opens: (1) interactive single scene, (2) twin-view (overview + close-up)."""
         if not self._ensure_layout():
             return
         try:
             import tempfile
             import plotly.graph_objects as go
             from plotly.offline import plot as plotly_plot
+            from plotly.subplots import make_subplots
+            from matplotlib import colors as mpl_colors
         except Exception:
-            self.status.set("3D CAD view needs Plotly. Install: pip install plotly")
+            self.status.set("3D CAD view needs Plotly + Matplotlib. Install: pip install plotly matplotlib")
             return
 
         d = self.current_layout_data
@@ -647,8 +715,10 @@ class PDK_App:
 
         R = (self.config["lens_diameter"] / 2.0) * 1000.0
         H2pi = self._h_2pi_um()
+        # height from realized wrapped phase (0..2π) → 0..H2pi
         h_um = (phase / (2.0 * np.pi)) * H2pi
 
+        # --- tiny Tk panel (stride + min diameter) ---
         top = tk.Toplevel(self.root); top.title("3D CAD (Plotly/WebGL) — full lens")
 
         row = tk.Frame(top); row.pack(side=tk.TOP, fill=tk.X)
@@ -658,11 +728,11 @@ class PDK_App:
                 showvalue=True, length=240).pack(side=tk.LEFT, padx=(0, 12))
 
         tk.Label(row, text="Min d (nm):", font=("Inter", 12)).pack(side=tk.LEFT)
-        ds_all = dnm[mask].astype(float)
-        dmax = float(np.nanmax(ds_all))
+        ds_all = dnm[mask].astype(float); dmax = float(np.nanmax(ds_all))
         mind_var = tk.DoubleVar(value=20.0)
-        tk.Scale(row, from_=10.0, to=max(100.0, 1.2*dmax), resolution=1.0,
-                orient="horizontal", variable=mind_var, showvalue=True, length=260).pack(side=tk.LEFT, padx=(0, 12))
+        tk.Scale(row, from_=10.0, to=max(100.0, 1.2 * dmax), resolution=1.0,
+                orient="horizontal", variable=mind_var, showvalue=True,
+                length=260).pack(side=tk.LEFT, padx=(0, 12))
 
         btns = tk.Frame(top); btns.pack(side=tk.TOP, fill=tk.X, pady=(6, 6))
         tk.Button(btns, text="Render", bg="#d97706", fg="white",
@@ -670,34 +740,38 @@ class PDK_App:
                 command=lambda: render()).pack(side=tk.LEFT, padx=8)
         status_lbl = tk.Label(btns, text="", font=("Inter", 12)); status_lbl.pack(side=tk.LEFT, padx=8)
 
-        # ---------- mesh builder with top/bottom caps + per-vertex colors ----------
+        # --- colormap helper (gentle hues) ---
+        cmap = mpl.colormaps.get_cmap("twilight_shifted")
+        def scalar_to_hex(u01):
+            rgba = cmap(np.clip(u01, 0.0, 1.0))
+            return mpl_colors.to_hex(rgba, keep_alpha=False)
+
+        # --- mesh builder with caps + per-vertex color ---
         def build_frustums(cx, cy, hh, d_nm, phi):
-            Vx = []; Vy = []; Vz = []; I = []; J = []; K = []; VC = []
+            Vx, Vy, Vz, I, J, K, VC = [], [], [], [], [], [], []
             vert_ofs = 0
-            rb = 0.5 * (d_nm * 1e-3)  # base radius (µm)
+
+            rb = 0.5 * (d_nm * 1e-3)                  # base radius (µm)
             taper = 0.55 if self.config.get("shape", "frustum") == "frustum" else 1.0
-            rt = rb * taper
+            rt = rb * taper                           # top radius (µm)
+
             sides = int(max(3, self.config.get("sides", 10)))
             ang = np.linspace(0, 2*np.pi, sides, endpoint=False)
             ca, sa = np.cos(ang), np.sin(ang)
 
-            # map phase to color with a gentle built-in Plotly colorscale
-            def phase_color(u):
-                # u in [0, 2π)
-                t = (u % (2*np.pi)) / (2*np.pi)
-                # shades of twilight-ish: interpolate between key colors
-                return f"hsl({int(360*t)}, 60%, 60%)"
+            col_u = (phi % (2*np.pi)) / (2*np.pi)
+            col_hex = [scalar_to_hex(u) for u in col_u]
 
-            def add_tri(a, b, c): I.append(a); J.append(b); K.append(c)
+            def add_tri(a, b, c):
+                I.append(a); J.append(b); K.append(c)
 
-            for Xc, Yc, H, RB, RT, ph in zip(cx, cy, hh, rb, rt, phi):
+            for Xc, Yc, H, RB, RT, c in zip(cx, cy, hh, rb, rt, col_hex):
                 xb = Xc + RB * ca; yb = Yc + RB * sa; zb = np.zeros_like(xb)
                 xt = Xc + RT * ca; yt = Yc + RT * sa; zt = np.full_like(xt, H)
-                Vx.extend(xb); Vy.extend(yb); Vz.extend(zb)
-                Vx.extend(xt); Vy.extend(yt); Vz.extend(zt)
-                base = vert_ofs
-                topb = base + sides
-                c = phase_color(ph)
+
+                Vx.extend(xb); Vy.extend(yb); Vz.extend(zb); VC.extend([c] * len(xb))  # bottom ring
+                Vx.extend(xt); Vy.extend(yt); Vz.extend(zt); VC.extend([c] * len(xt))  # top ring
+                base = vert_ofs; topb = base + sides
 
                 # side walls
                 for k in range(sides):
@@ -705,24 +779,27 @@ class PDK_App:
                     v1 = base + ((k + 1) % sides)
                     v2 = topb + k
                     v3 = topb + ((k + 1) % sides)
-                    add_tri(v0, v1, v2)
-                    add_tri(v1, v3, v2)
+                    add_tri(v0, v1, v2); add_tri(v1, v3, v2)
+
                 # top cap
                 ct = base + 2 * sides
-                Vx.append(Xc); Vy.append(Yc); Vz.append(H)
+                Vx.append(Xc); Vy.append(Yc); Vz.append(H); VC.append(c)
                 for k in range(sides):
                     add_tri(ct, topb + k, topb + ((k + 1) % sides))
+
                 # bottom cap
                 cb = ct + 1
-                Vx.append(Xc); Vy.append(Yc); Vz.append(0.0)
+                Vx.append(Xc); Vy.append(Yc); Vz.append(0.0); VC.append(c)
                 for k in range(sides):
                     add_tri(cb, base + ((k + 1) % sides), base + k)
-                # vertex colors (constant per vertex here)
-                VC.extend([c] * (2*sides + 2))
+
                 vert_ofs = cb + 1
 
-            return np.array(Vx), np.array(Vy), np.array(Vz), np.array(I), np.array(J), np.array(K), np.array(VC)
+            return (np.array(Vx), np.array(Vy), np.array(Vz),
+                    np.array(I), np.array(J), np.array(K),
+                    np.array(VC))
 
+        # --- deterministic sub-sampling over full lens (triangle budget) ---
         def select_points():
             s0 = int(max(1, stride_var.get()))
             xs = x[::s0, ::s0]; ys = y[::s0, ::s0]
@@ -741,9 +818,9 @@ class PDK_App:
                 Iidx, Jidx = np.indices(mk.shape)
                 mk &= (Iidx % extra == 0) & (Jidx % extra == 0)
                 n = int(np.count_nonzero(mk))
-
             return xs[mk], ys[mk], ds[mk].astype(float), hs[mk].astype(float), ph[mk].astype(float), n
 
+        # --- main render (opens BOTH windows) ---
         def render():
             status_lbl.config(text="Rendering…"); top.update_idletasks()
             xs, ys, ds, hs, phs, n = select_points()
@@ -752,19 +829,22 @@ class PDK_App:
 
             Vx, Vy, Vz, I, J, K, VC = build_frustums(xs, ys, hs, ds, phs)
 
-            mesh = go.Mesh3d(
-                x=Vx, y=Vy, z=Vz, i=I, j=J, k=K,
-                vertexcolor=VC, opacity=1.0, showscale=False, hoverinfo="skip",
-                lighting=dict(ambient=0.45, diffuse=0.7, specular=0.9, roughness=0.18, fresnel=0.2),
-                lightposition=dict(x=0, y=0, z=2000)
-            )
+            def mesh_trace():
+                return go.Mesh3d(
+                    x=Vx, y=Vy, z=Vz, i=I, j=J, k=K,
+                    vertexcolor=VC, opacity=1.0, showscale=False, hoverinfo="skip",
+                    lighting=dict(ambient=0.45, diffuse=0.7, specular=0.9, roughness=0.18, fresnel=0.2),
+                    lightposition=dict(x=0, y=0, z=2000)
+                )
 
             th = np.linspace(0, 2*np.pi, 512)
-            outline = go.Scatter3d(x=R*np.cos(th), y=R*np.sin(th), z=np.zeros_like(th),
-                                mode="lines", line=dict(color="rgba(255,255,255,0.6)", width=2),
-                                showlegend=False, hoverinfo="skip")
+            def ring_trace():
+                return go.Scatter3d(x=R*np.cos(th), y=R*np.sin(th), z=np.zeros_like(th),
+                                    mode="lines", line=dict(color="rgba(255,255,255,0.6)", width=2),
+                                    showlegend=False, hoverinfo="skip")
 
-            fig = go.Figure([mesh, outline])
+            # 1) Interactive single scene (as before)
+            fig = go.Figure([mesh_trace(), ring_trace()])
             fig.update_layout(
                 scene=dict(
                     xaxis_title="X (μm)", yaxis_title="Y (μm)", zaxis_title="Height (μm)",
@@ -775,16 +855,57 @@ class PDK_App:
                 ),
                 template="plotly_dark",
                 margin=dict(l=0, r=0, t=40, b=0),
-                scene_camera=dict(eye=dict(x=0.01, y=0.01, z=2.8))
+                scene_camera=dict(eye=dict(x=0.9, y=1.1, z=1.25))  # slightly oblique by default
             )
-
-            import tempfile
-            from plotly.offline import plot as plotly_plot
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".html"); tmp.close()
             plotly_plot(fig, filename=tmp.name, auto_open=True)
-            status_lbl.config(text=f"Opened in browser (pillars: {n:,}).")
 
+            # 2) Two-view snapshot: overview + angled close-up (separate HTML)
+            fig2 = make_subplots(rows=1, cols=2,
+                                specs=[[{"type": "scene"}, {"type": "scene"}]],
+                                subplot_titles=("Overview (oblique)", "Close-up at rim"))
+
+            # left scene (overview)
+            fig2.add_trace(mesh_trace(), row=1, col=1)
+            fig2.add_trace(ring_trace(), row=1, col=1)
+
+            # right scene (close-up)
+            fig2.add_trace(mesh_trace(), row=1, col=2)
+            fig2.add_trace(ring_trace(), row=1, col=2)
+
+            # common scene style
+            base_scene = dict(
+                xaxis_title="X (μm)", yaxis_title="Y (μm)", zaxis_title="Height (μm)",
+                aspectmode="data",
+                xaxis=dict(backgroundcolor="#111827", showgrid=False, zeroline=False),
+                yaxis=dict(backgroundcolor="#111827", showgrid=False, zeroline=False),
+                zaxis=dict(backgroundcolor="#111827", showgrid=True,  zeroline=False),
+            )
+
+            # close-up window near rim (45° sector)
+            cx = 0.25 * R / np.sqrt(2)
+            cy = 0.25 * R / np.sqrt(2)
+            w  = 0.22 * R
+
+            fig2.update_layout(
+                template="plotly_dark",
+                margin=dict(l=10, r=10, t=55, b=10),
+                scene=base_scene | dict(camera=dict(eye=dict(x=1.6, y=1.6, z=1.1))),
+                scene2=(base_scene | dict(
+                    xaxis=dict(range=[cx - w, cx + w], backgroundcolor="#111827", showgrid=False, zeroline=False),
+                    yaxis=dict(range=[cy - w, cy + w], backgroundcolor="#111827", showgrid=False, zeroline=False),
+                    zaxis=dict(range=[0, H2pi], backgroundcolor="#111827", showgrid=True, zeroline=False),
+                    camera=dict(eye=dict(x=2.2, y=1.8, z=1.4))  # angled close-up
+                ))
+            )
+            tmp2 = tempfile.NamedTemporaryFile(delete=False, suffix=".html"); tmp2.close()
+            plotly_plot(fig2, filename=tmp2.name, auto_open=True)
+
+            status_lbl.config(text=f"Opened interactive view + two-view snapshot (pillars: {n:,}).")
+
+        # initial render
         render()
+
 
 # ----------------------------- Main -----------------------------
 if __name__ == "__main__":
