@@ -589,189 +589,107 @@ class PDK_App:
         draw_visible()
         self.status.set("Interactive layout loaded.")
         
-    # ---------- NEW: Integrated 3D CAD view ----------
+    # ---------- FINAL: Static, High-Detail 3D Image Rendering ----------
     def _display_3d_view(self):
+        # Required libraries for this new method
+        import tempfile
+        from PIL import Image, ImageTk
+
         if not self._ensure_layout(): return
         self._clear_right_panel()
-        self.status.set("Generating 3D view...")
+        data = self.current_layout_data
+        
+        # This frame will hold the final image label
+        container = ttk.Frame(self.right_frame)
+        container.pack(fill="both", expand=True)
+
+        self.status.set("Generating 3D image, this may take a moment...")
         self.root.update_idletasks()
 
-        data = self.current_layout_data
-        x_um = data["x"]
-        y_um = data["y"]
-        diameters_nm = data["diameters"]
-        realized_phase = data["phase_realized"]
-        active_mask = data["active_mask"]
-        h_um_map = self._pillar_heights_um(realized_phase)
-
-        # Filter active pillars and flatten arrays
-        active_x = x_um[active_mask].flatten()
-        active_y = y_um[active_mask].flatten()
-        active_diameters_nm = diameters_nm[active_mask].flatten()
-        active_h_um = h_um_map[active_mask].flatten()
-
-        # Define a reasonable subsampling to keep the plot responsive but representative
-        # Only draw a subset for 3D visualization to prevent extreme slowness
-        subsample_factor = 2 # Draw every 2nd pillar
-        active_x = active_x[::subsample_factor]
-        active_y = active_y[::subsample_factor]
-        active_diameters_nm = active_diameters_nm[::subsample_factor]
-        active_h_um = active_h_um[::subsample_factor]
+        # --- Step 1: Generate the plot in memory (off-screen) ---
+        fig = plt.figure(figsize=(14, 10), dpi=150) # Increased DPI for a sharper image
+        ax_main = fig.add_subplot(111, projection='3d')
+        ax_inset = fig.add_axes([0.62, 0.62, 0.3, 0.3], projection='3d')
         
-        # Max radius for view
-        lens_radius_um = self.config["lens_diameter"] / 2 * 1000
-
-        # Create figure and canvas
-        fig = plt.figure(figsize=(12, 8))
-        canvas = FigureCanvasTkAgg(fig, master=self.right_frame)
-        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        self.right_panel_widget = canvas.get_tk_widget()
-        
-        # --- Main 3D Axes ---
-        ax = fig.add_subplot(111, projection='3d')
-        ax.set_facecolor("#FFFFFF") # White background for contrast with green pillars
-
-        pillar_color = '#0d9488' # A teal/green color
-        edge_color = '#084f48' # Darker edge for definition
-
-        num_sides = self.config.get("sides", 10) # N for frustum
-
-        # Function to create frustum polygons for 3D plot
-        def create_frustum(cx, cy, h_um, r_base_um, r_top_um, N=10):
-            if r_base_um <= 0 or h_um <= 0: return []
-            
-            # Ensure top radius is not larger than base and not too small
-            r_top_um = max(0.01, min(r_top_um, r_base_um * 0.95)) # Top radius slightly smaller than base for frustum
-            
+        def create_pillar_polygons(cx, cy, h_um, r_base_um, N, is_frustum):
+            if r_base_um <= 0: return []
+            taper_ratio = 0.7 if is_frustum else 1.0
+            r_top_um = r_base_um * taper_ratio
             theta = np.linspace(0, 2 * np.pi, N, endpoint=False)
-            
-            # Base polygon
-            x_base = cx + r_base_um * np.cos(theta)
-            y_base = cy + r_base_um * np.sin(theta)
-            z_base = np.zeros(N)
-            base_polygon = list(zip(x_base, y_base, z_base))
-
-            # Top polygon
-            x_top = cx + r_top_um * np.cos(theta)
-            y_top = cy + r_top_um * np.sin(theta)
-            z_top = np.full(N, h_um)
-            top_polygon = list(zip(x_top, y_top, z_top))
-            
-            polygons = [base_polygon, top_polygon] # Base and top faces
-            
-            # Side faces
+            x_base = cx + r_base_um * np.cos(theta); y_base = cy + r_base_um * np.sin(theta)
+            base_polygon = list(zip(x_base, y_base, np.zeros(N)))
+            x_top = cx + r_top_um * np.cos(theta); y_top = cy + r_top_um * np.sin(theta)
+            top_polygon = list(zip(x_top, y_top, np.full(N, h_um)))
+            polygons = [base_polygon, top_polygon]
             for i in range(N):
                 next_i = (i + 1) % N
                 side_face = [base_polygon[i], base_polygon[next_i], top_polygon[next_i], top_polygon[i]]
                 polygons.append(side_face)
             return polygons
-
-        # Iterate through active pillars and draw frustums
-        all_polygons = []
-        for i in range(len(active_x)):
-            cx, cy = active_x[i], active_y[i]
-            d_nm = active_diameters_nm[i]
-            h_um = active_h_um[i]
-
-            r_base_um = d_nm * 0.5 * 1e-3 # Base radius in um
-            r_top_um = r_base_um * 0.7 # Example: top is 70% of base radius for frustum effect
-
-            if self.config["shape"] == "frustum":
-                polys = create_frustum(cx, cy, h_um, r_base_um, r_top_um, N=num_sides)
-            else: # Cylinder
-                polys = create_frustum(cx, cy, h_um, r_base_um, r_base_um, N=num_sides) # r_top = r_base for cylinder
+        s = 1; min_nm = 0
+        x_strided = data["x"][::s, ::s]; y_strided = data["y"][::s, ::s]
+        d_nm_strided = data["diameters"][::s, ::s]; mask_strided = data["active_mask"][::s, ::s]
+        final_mask = (d_nm_strided >= min_nm) & mask_strided
+        active_x = x_strided[final_mask].flatten(); active_y = y_strided[final_mask].flatten()
+        active_diameters_nm = d_nm_strided[final_mask].flatten()
+        FIXED_HEIGHT = 25.0
+        active_h_um = np.full_like(active_x, FIXED_HEIGHT)
+        count = len(active_x)
+        all_polygons = []; is_frustum = self.config["shape"] == "frustum"; num_sides = self.config.get("sides", 10)
+        for i in range(count):
+            r_base_um = active_diameters_nm[i] * 0.5 * 1e-3
+            polys = create_pillar_polygons(active_x[i], active_y[i], active_h_um[i], r_base_um, num_sides, is_frustum)
             all_polygons.extend(polys)
-        
         if all_polygons:
-            mesh = Poly3DCollection(all_polygons, facecolor=pillar_color, edgecolor=edge_color, linewidth=0.5, alpha=0.9)
-            ax.add_collection3d(mesh)
-
-        # --- Appearance settings for main plot ---
-        ax.view_init(elev=35, azim=-45)
-        ax.axis('off')
-        
-        # Dynamically set limits based on actual pillar positions and sizes
-        x_min, x_max = active_x.min(), active_x.max()
-        y_min, y_max = active_y.min(), active_y.max()
-        z_min, z_max = 0, active_h_um.max() * 1.2 # Add some buffer to height
-
-        ax.set_xlim(x_min - lens_radius_um * 0.1, x_max + lens_radius_um * 0.1)
-        ax.set_ylim(y_min - lens_radius_um * 0.1, y_max + lens_radius_um * 0.1)
-        ax.set_zlim(z_min, z_max)
-        
-        ax.set_box_aspect([x_max-x_min, y_max-y_min, z_max-z_min]) # Dynamic aspect ratio
-        
-        # --- Create Inset Axes ---
-        # Position inset axes in top right, adjusted to fit
-        inset_ax = fig.add_axes([0.65, 0.65, 0.3, 0.3], projection='3d') # [left, bottom, width, height]
-        inset_ax.set_facecolor("#FFFFFF")
-        
-        # Select a smaller patch of pillars for the inset view (e.g., central region)
-        # Using a fixed region relative to the overall lens size for consistency
-        inset_center_x = 0 # Center of the lens
-        inset_center_y = 0
-        inset_region_size_um = lens_radius_um * 0.4 # 40% of lens radius
-
-        inset_mask = (active_x > inset_center_x - inset_region_size_um/2) & \
-                     (active_x < inset_center_x + inset_region_size_um/2) & \
-                     (active_y > inset_center_y - inset_region_size_um/2) & \
-                     (active_y < inset_center_y + inset_region_size_um/2)
-        
-        inset_x, inset_y = active_x[inset_mask], active_y[inset_mask]
-        inset_diameters_nm = active_diameters_nm[inset_mask]
-        inset_h_um = active_h_um[inset_mask]
-
+            mesh = Poly3DCollection(all_polygons, facecolor='#0d9488', edgecolor='#084f48', linewidth=0.2, alpha=0.9)
+            ax_main.add_collection3d(mesh)
+        lens_radius_um = data["lens_radius_um"]; inset_size = lens_radius_um * 0.2
+        inset_center_x = lens_radius_um * 0.5; inset_center_y = lens_radius_um * 0.5
+        inset_mask = ((active_x >= inset_center_x - inset_size / 2) & (active_x <= inset_center_x + inset_size / 2) & (active_y >= inset_center_y - inset_size / 2) & (active_y <= inset_center_y + inset_size / 2))
         inset_polygons = []
-        for i in range(len(inset_x)):
-            cx, cy = inset_x[i], inset_y[i]
-            d_nm = inset_diameters_nm[i]
-            h_um = inset_h_um[i]
-
-            r_base_um = d_nm * 0.5 * 1e-3
-            r_top_um = r_base_um * 0.7
-
-            if self.config["shape"] == "frustum":
-                polys = create_frustum(cx, cy, h_um, r_base_um, r_top_um, N=num_sides)
-            else: # Cylinder
-                polys = create_frustum(cx, cy, h_um, r_base_um, r_base_um, N=num_sides)
+        for i in np.where(inset_mask)[0]:
+            r_base_um = active_diameters_nm[i] * 0.5 * 1e-3
+            polys = create_pillar_polygons(active_x[i], active_y[i], active_h_um[i], r_base_um, num_sides, is_frustum)
             inset_polygons.extend(polys)
-            
         if inset_polygons:
-            inset_mesh = Poly3DCollection(inset_polygons, facecolor=pillar_color, edgecolor=edge_color, linewidth=0.5, alpha=0.9)
-            inset_ax.add_collection3d(inset_mesh)
+            inset_mesh = Poly3DCollection(inset_polygons, facecolor='#0d9488', edgecolor='#084f48', linewidth=0.5, alpha=0.9)
+            ax_inset.add_collection3d(inset_mesh)
+        ax_main.axis('off'); ax_main.view_init(elev=40, azim=-60)
+        if count > 0:
+            x_min, x_max = data["x"].min(), data["x"].max(); y_min, y_max = data["y"].min(), data["y"].max()
+            ax_main.set_xlim(x_min, x_max); ax_main.set_ylim(y_min, y_max)
+            ax_main.set_zlim(0, FIXED_HEIGHT * 1.2)
+            ax_main.set_box_aspect([(x_max - x_min), (y_max - y_min), (FIXED_HEIGHT * 1.2)])
+        rx, ry = inset_center_x, inset_center_y; rs = inset_size / 2
+        ax_main.plot([rx-rs, rx+rs, rx+rs, rx-rs, rx-rs], [ry-rs, ry-rs, ry+rs, ry+rs, ry-rs], zs=0, color='red', linewidth=2, zorder=10)
+        ax_inset.axis('off'); ax_inset.view_init(elev=20, azim=-45)
+        ax_inset.set_xlim(rx-rs, rx+rs); ax_inset.set_ylim(ry-rs, ry+rs)
+        ax_inset.set_zlim(0, FIXED_HEIGHT * 1.2)
+        ax_inset.set_box_aspect([inset_size, inset_size, FIXED_HEIGHT * 1.2])
 
-        # --- Appearance settings for inset plot ---
-        inset_ax.view_init(elev=20, azim=-65)
-        inset_ax.axis('off')
+        # --- Step 2: Save the generated figure to a temporary file ---
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpfile:
+            fig.savefig(tmpfile.name, bbox_inches='tight', pad_inches=0.1, facecolor=fig.get_facecolor())
+            temp_image_path = tmpfile.name
+        
+        # Close the figure to free up memory
+        plt.close(fig)
 
-        # Dynamically set limits for inset
-        if len(inset_x) > 0:
-            inset_ax.set_xlim(inset_x.min() - inset_region_size_um * 0.1, inset_x.max() + inset_region_size_um * 0.1)
-            inset_ax.set_ylim(inset_y.min() - inset_region_size_um * 0.1, inset_y.max() + inset_region_size_um * 0.1)
-            inset_ax.set_zlim(z_min, z_max)
-            inset_ax.set_box_aspect([inset_x.max()-inset_x.min(), inset_y.max()-inset_y.min(), z_max-z_min])
-        else:
-            inset_ax.set_xlim(-1,1); inset_ax.set_ylim(-1,1); inset_ax.set_zlim(0,1) # Fallback if no pillars in inset
+        # --- Step 3: Load the image file and display it in a Tkinter Label ---
+        try:
+            img = Image.open(temp_image_path)
+            photo = ImageTk.PhotoImage(img)
             
-        # --- Draw the red rectangle for the inset region on the main plot ---
-        # Convert data coordinates to figure coordinates for the rectangle
-        # This is a bit tricky with 3D axes, approximating for now to indicate the region
-        
-        # Approximate rectangle corners in data coords
-        rect_x_min = inset_center_x - inset_region_size_um/2
-        rect_x_max = inset_center_x + inset_region_size_um/2
-        rect_y_min = inset_center_y - inset_region_size_um/2
-        rect_y_max = inset_center_y + inset_region_size_um/2
+            image_label = ttk.Label(container, image=photo)
+            # Keep a reference to the image to prevent it from being garbage collected
+            image_label.image = photo 
+            image_label.pack(fill="both", expand=True)
 
-        # Draw the rectangle on the 2D projection of the 3D axes
-        # It's not a perfect box in 3D, but indicative
-        ax.plot([rect_x_min, rect_x_max, rect_x_max, rect_x_min, rect_x_min],
-                [rect_y_min, rect_y_min, rect_y_max, rect_y_max, rect_y_min],
-                zs=[0]*5, color='red', linewidth=2, zorder=10) # Draw on the base plane
+            self.right_panel_widget = image_label
+            self.status.set(f"Static 3D image with {count:,} pillars displayed.")
         
-        canvas.draw()
-        self.status.set("Generic 3D CAD view displayed.")
-        
+        except Exception as e:
+            self.status.set(f"Error loading 3D image: {e}")
     # ---------- Estimate writing time ----------
     def _estimate_time(self):
         if not self._ensure_layout(): return
