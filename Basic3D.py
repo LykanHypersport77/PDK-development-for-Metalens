@@ -11,9 +11,6 @@ from matplotlib.patches import Circle, RegularPolygon, Rectangle
 from matplotlib.collections import PatchCollection
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection # For custom 3D polygons
 
-# (All original scientific and helper functions like generate_luts_for_method,
-# create_inverse_interpolators, VScrollFrame, etc., remain unchanged)
-
 # ----------------------------- Materials / Resins -----------------------------
 MATERIALS = {
     "Si":   {"n": 3.43, "lambda_range_um": (1.2, 14.0)},
