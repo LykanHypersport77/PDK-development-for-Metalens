@@ -1,20 +1,17 @@
 import tkinter as tk
 from tkinter import filedialog
-import tkinter.font as tkfont
-
-# For the modern UI theme and widgets
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
-
 import numpy as np
 from scipy.interpolate import interp1d
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-from matplotlib.patches import Circle, RegularPolygon
+from matplotlib.patches import Circle, RegularPolygon, Rectangle
 from matplotlib.collections import PatchCollection
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection # For custom 3D polygons
 
-# (All your scientific and helper functions like generate_luts_for_method,
+# (All original scientific and helper functions like generate_luts_for_method,
 # create_inverse_interpolators, VScrollFrame, etc., remain unchanged)
 
 # ----------------------------- Materials / Resins -----------------------------
@@ -39,12 +36,14 @@ METHODS = {
         "d_frac": (0.30, 0.80),  # 30–80% of pitch
         "quant_um": 0.10,
         "h2pi_scale": 0.85,
+        "optimal_pitch_um": 9.0, # Automatically set pitch
     },
     "fs two-photon AM": {
         "compatible_resins": {"IP-Dip + TiO2", "IP-Dip + SiO2", "ORMOCER + ZrO2"},
         "d_frac": (0.20, 0.90),  # 20–90% of pitch
         "quant_um": 0.05,
         "h2pi_scale": 1.00,
+        "optimal_pitch_um": 5.0, # Automatically set pitch
     },
 }
 
@@ -151,7 +150,6 @@ def choice_map(pairs): return {a: b for a, b in pairs}
 WL_CHOICES   = [("λ = 9 μm", 9.0), ("λ = 10 μm", 10.0)]
 DIAM_CHOICES = [("50 µm", 0.05), ("75 µm", 0.075), ("100 µm", 0.10),
                 ("1.5 mm", 1.5), ("10 mm", 10.0), ("15 mm", 15.0), ("20 mm", 20.0), ("25 mm", 25.0)]
-PITCH_CHOICES= [("5 µm", 5.0), ("7 µm", 7.0), ("9 µm", 9.0), ("12 µm", 12.0)]
 WD_CHOICES   = [("5 mm", 5.0), ("25 mm", 25.0), ("50 mm", 50.0), ("100 mm", 100.0), ("200 mm", 200.0)]
 METHOD_LIST  = list(METHODS.keys())
 
@@ -171,6 +169,7 @@ class PDK_App:
         self.REALIZED_UPSAMPLE = 3
 
         # -------- Defaults (Frustum) --------
+        default_method = METHOD_LIST[1]
         self.config = {
             "wavelength_um": WL_CHOICES[0][1],
             "substrate": list(MATERIALS.keys())[0],
@@ -178,13 +177,14 @@ class PDK_App:
             "shape": "frustum",
             "sides": 10,
             "lens_diameter": DIAM_CHOICES[3][1],
-            "pitch_um": PITCH_CHOICES[2][1],
+            "pitch_um": METHODS[default_method]["optimal_pitch_um"], # Set from method
             "working_distance": WD_CHOICES[1][1],
             "perf_pct": 80.0,
-            "method": METHOD_LIST[1],
+            "method": default_method,
         }
         self.current_layout_data = {}
         self._layout_key = None
+        self.right_panel_widget = None # Holds the current right-side widget (e.g., canvas)
 
         # -------- Frames --------
         left_sf = VScrollFrame(root, width=500, bootstyle=SECONDARY)
@@ -192,8 +192,8 @@ class PDK_App:
         left = left_sf.body
         left_sf.scroll_to_top()
 
-        right = ttk.Frame(root)
-        right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(0, 10), pady=10)
+        self.right_frame = ttk.Frame(root)
+        self.right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(0, 10), pady=10)
 
         # -------- Left Panel Widgets --------
         ttk.Label(left, text="Metalens PDK", font=("Inter", 18, "bold")).pack(anchor="w", pady=(0, 5), padx=5)
@@ -205,7 +205,7 @@ class PDK_App:
 
         self._build_all_controls(left)
 
-        # -------- Right Panel Matplotlib Figure --------
+        # -------- Right Panel Matplotlib Figure (initially empty) --------
         plt.style.use("dark_background")
         mpl.rcParams.update({
             "figure.facecolor": "#222b31", # from ttkbootstrap superhero theme
@@ -214,13 +214,30 @@ class PDK_App:
             "axes.labelcolor": "lightgray",
             "xtick.color": "lightgray",
             "ytick.color": "lightgray",
+            "font.size": 8 # Smaller font size for plots
         })
-        self.fig = plt.figure(figsize=(12.5, 8.0))
-        self.canvas = FigureCanvasTkAgg(self.fig, master=right)
-        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-
+        
+        self._show_welcome_message() # NEW: Show welcome message instead of plots
         self._on_any_change(from_init=True)
-        self.update_plots() # Generate initial plots on startup
+        
+    def _clear_right_panel(self):
+        """Destroys any widget currently in the right-side frame."""
+        for widget in self.right_frame.winfo_children():
+            widget.destroy()
+        self.right_panel_widget = None
+
+    def _show_welcome_message(self):
+        """Displays a welcome message in the right panel."""
+        self._clear_right_panel()
+        welcome_label = ttk.Label(
+            self.right_frame,
+            text="Welcome to the Metalens PDK\n\nSelect your parameters on the left and click one of the action buttons.",
+            font=("Inter", 14),
+            justify="center",
+            anchor="center"
+        )
+        welcome_label.pack(fill="both", expand=True)
+        self.right_panel_widget = welcome_label
 
     def _create_control_group(self, parent, title):
         frame = ttk.Labelframe(parent, text=title, bootstyle=PRIMARY, padding=(10, 5))
@@ -246,9 +263,6 @@ class PDK_App:
         self.var_D = tk.StringVar(value="1.5 mm")
         self._add_option_menu(geom_frame, "Lens Aperture (Diameter)", self.var_D, choice_map(DIAM_CHOICES).keys(), self._on_any_change)
 
-        self.var_pitch = tk.StringVar(value="9 µm")
-        self._add_option_menu(geom_frame, "Lattice Pitch p (µm)", self.var_pitch, choice_map(PITCH_CHOICES).keys(), self._on_any_change)
-
         self.var_sub = tk.StringVar(value=list(MATERIALS.keys())[0])
         self._add_option_menu(geom_frame, "Substrate Material", self.var_sub, MATERIALS.keys(), self._on_any_change)
 
@@ -257,18 +271,14 @@ class PDK_App:
         self.var_shape = tk.StringVar(value="Frustum (N-gon)")
         self._add_option_menu(atom_frame, "Shape", self.var_shape, ["Frustum (N-gon)", "Cylinder"], self._on_any_change)
 
-        # --- N-gon Sides Slider with Value Display (FIXED for integers) ---
         self.var_sides = tk.IntVar(value=10)
         ttk.Label(atom_frame, text="Sides (N) for Frustum").pack(anchor="w", pady=(5, 2))
-
         sides_frame = ttk.Frame(atom_frame)
-        sides_frame.pack(fill=X, expand=True)
-
+        sides_frame.pack(fill=tk.X, expand=True)
         sides_value_label = ttk.Label(sides_frame, textvariable=self.var_sides, font="-weight bold", width=2)
-        sides_value_label.pack(side=RIGHT, padx=(5, 0))
-
+        sides_value_label.pack(side=tk.RIGHT, padx=(5, 0))
         self.sides_scale = ttk.Scale(sides_frame, from_=8, to=12, variable=self.var_sides, command=self._on_sides_scale_change)
-        self.sides_scale.pack(fill=X, expand=True)
+        self.sides_scale.pack(fill=tk.X, expand=True)
 
         # --- Manufacturing & Performance ---
         mfg_frame = self._create_control_group(parent, "Manufacturing & Performance")
@@ -281,33 +291,27 @@ class PDK_App:
         self.compat_lbl = ttk.Label(mfg_frame, text="")
         self.compat_lbl.pack(anchor="w", pady=(6, 0))
 
-        # --- Performance Slider with Value Display ---
         self.var_perf = tk.IntVar(value=80)
         ttk.Label(mfg_frame, text="Expected Focusing Performance (%)").pack(anchor="w", pady=(8, 2))
-
         perf_frame = ttk.Frame(mfg_frame)
-        perf_frame.pack(fill=X, expand=True)
-
+        perf_frame.pack(fill=tk.X, expand=True)
         perf_value_label = ttk.Label(perf_frame, textvariable=self.var_perf, font="-weight bold", width=4)
-        perf_value_label.pack(side=RIGHT, padx=(5, 0))
-
+        perf_value_label.pack(side=tk.RIGHT, padx=(5, 0))
         perf_scale = ttk.Scale(perf_frame, from_=20, to=100, variable=self.var_perf, command=self._on_perf_scale_change)
-        perf_scale.pack(fill=X, expand=True)
+        perf_scale.pack(fill=tk.X, expand=True)
 
         # --- Output / Actions ---
         out_frame = self._create_control_group(parent, "Actions")
-        self.btn_generate = ttk.Button(out_frame, text="Generate Plots", command=self.update_plots, bootstyle=SUCCESS)
+        self.btn_generate = ttk.Button(out_frame, text="Generate Analysis Plots", command=self.update_plots, bootstyle=SUCCESS)
         self.btn_generate.pack(fill=tk.X, pady=(5, 8))
 
-        # Button grid
         btn_grid = ttk.Frame(out_frame)
         btn_grid.pack(fill=tk.X)
         btn_grid.columnconfigure((0, 1), weight=1)
-
         btn_style = "primary-outline"
         btn_pad = {'padx': 2, 'pady': 2}
-        ttk.Button(btn_grid, text="Interactive Layout", command=self._open_vector_layout_viewer, bootstyle=btn_style).grid(row=0, column=0, sticky="ew", **btn_pad)
-        ttk.Button(btn_grid, text="3D CAD View", command=self._open_3d_cad_plotly_full, bootstyle=btn_style).grid(row=0, column=1, sticky="ew", **btn_pad)
+        ttk.Button(btn_grid, text="2D vector Layout", command=self._display_vector_layout, bootstyle=btn_style).grid(row=0, column=0, sticky="ew", **btn_pad)
+        ttk.Button(btn_grid, text="Show 3D CAD View", command=self._display_3d_view, bootstyle=btn_style).grid(row=0, column=1, sticky="ew", **btn_pad)
         ttk.Button(btn_grid, text="Export GDSII", command=self.export_gdsii, bootstyle=btn_style).grid(row=1, column=0, sticky="ew", **btn_pad)
         ttk.Button(btn_grid, text="Export CSV", command=self.generate_csv_file, bootstyle=btn_style).grid(row=1, column=1, sticky="ew", **btn_pad)
 
@@ -318,33 +322,31 @@ class PDK_App:
         ttk.Label(out_frame, textvariable=self.status, wraplength=400).pack(anchor="w", pady=(8, 0))
 
     def _mark_plots_stale(self):
-        self.btn_generate.config(text="Update Plots (stale)", bootstyle=(SUCCESS, OUTLINE))
+        self.btn_generate.config(text="Update Analysis Plots (stale)", bootstyle=(SUCCESS, OUTLINE))
 
     def _mark_plots_fresh(self):
-        self.btn_generate.config(text="Generate Plots", bootstyle=SUCCESS)
+        self.btn_generate.config(text="Generate Analysis Plots", bootstyle=SUCCESS)
         self.root.update_idletasks()
 
     def _on_any_change(self, *args, from_init=False):
-        # --- Update self.config dictionary ---
         self.config["wavelength_um"] = choice_map(WL_CHOICES)[self.var_wl.get()]
         self.config["substrate"] = self.var_sub.get()
         self.config["resin"] = self.var_resin.get()
         self.config["shape"] = "frustum" if self.var_shape.get().lower().startswith("frustum") else "cylinder"
         self.config["sides"] = int(self.var_sides.get())
         self.config["lens_diameter"] = choice_map(DIAM_CHOICES)[self.var_D.get()]
-        self.config["pitch_um"] = choice_map(PITCH_CHOICES)[self.var_pitch.get()]
         self.config["working_distance"] = choice_map(WD_CHOICES)[self.var_f.get()]
         self.config["perf_pct"] = float(self.var_perf.get())
+        
+        # Set method and then determine pitch from it
         self.config["method"] = self.var_method.get()
+        self.config["pitch_um"] = METHODS[self.config["method"]]["optimal_pitch_um"]
 
-        # --- Update UI state based on config ---
         self.sides_scale.config(state=("normal" if self.config["shape"] == "frustum" else "disabled"))
-
         self.current_layout_data = {}
         self._layout_key = None
-        if not from_init: # Don't mark as stale on first run
+        if not from_init:
             self._mark_plots_stale()
-
         self._update_info_warn()
         self._update_compatibility_label()
 
@@ -359,7 +361,8 @@ class PDK_App:
         rng, n = MATERIALS[sub]["lambda_range_um"], MATERIALS[sub]["n"]
         D, f = self.config["lens_diameter"], self.config["working_distance"]
         na = (D / (2.0 * f))
-        self.info.set(f"Substrate {sub}: n≈{n:.2f} ({rng[0]}-{rng[1]} μm). Current Lens NA ≈ {na:.3f}.")
+        pitch = self.config["pitch_um"]
+        self.info.set(f"Substrate {sub}: n≈{n:.2f} ({rng[0]}-{rng[1]} μm). Lens NA ≈ {na:.3f}. | Auto-selected pitch: {pitch} µm.")
 
         warn_msg = ""
         if na < 0.01:
@@ -407,13 +410,12 @@ class PDK_App:
             "active_mask": active,
             "phase_ideal": ideal_wrapped,
             "phase_realized": realized_phase,
-            "diameters": diameters,
+            "diameters": diameters, # nm
             "fab_params": fab_params,
-            "phase_lut": luts["phase_lut"], "fab_lut": luts["fab_lut"]
+            "phase_lut": luts["phase_lut"], "fab_lut": luts["fab_lut"],
+            "lens_radius_um": radius_um
         }
         self._layout_key = self._current_cache_key()
-
-        # Simple DRC info
         active_d = diameters[active]
         if active_d.size:
             max_d_um = float(active_d.max()) * 1e-3
@@ -427,79 +429,71 @@ class PDK_App:
             return self._compute_layout()
         return True
 
-    # ---------- Height/phase helpers & ttk helpers ----------
     def _h_2pi_um(self):
-        """Physically-informed 2π height (tunable)."""
         lam = float(self.config["wavelength_um"])
         n_eff = RESINS[self.config["resin"]]["n_eff"]
-        n_env = 1.0  # air
-        delta_n = max(1e-3, abs(n_eff - n_env))
+        delta_n = max(1e-3, abs(n_eff - 1.0))
         k_shape = 1.15 if self.config.get("shape","frustum")=="frustum" else 1.0
         k_method = METHODS[self.config["method"]].get("h2pi_scale", 1.0)
         k_perf = max(0.6, min(1.2, self.config["perf_pct"]/80.0))
         return (lam / delta_n) * k_shape * k_method * k_perf
 
     def _pillar_heights_um(self, wrapped_phase):
-        """Map wrapped phase [0..2π] → pillar height using _h_2pi_um()."""
         h2pi = self._h_2pi_um()
         arr = np.asarray(wrapped_phase, dtype=float)
         return np.where(np.isfinite(arr), (arr / (2.0 * np.pi)) * h2pi, np.nan)
     
     def _on_perf_scale_change(self, value):
-        """Callback to round the performance slider's value to the nearest integer."""
-        rounded_value = int(round(float(value)))
-        self.var_perf.set(rounded_value)
+        self.var_perf.set(int(round(float(value))))
         self._on_any_change()
 
     def _on_sides_scale_change(self, value):
-        """Callback to round the N-gon sides slider's value to the nearest integer."""
-        rounded_value = int(round(float(value)))
-        self.var_sides.set(rounded_value)
+        self.var_sides.set(int(round(float(value))))
         self._on_any_change()
 
     def _on_viewer_scale_change(self, value, var):
-        """Callback to round the viewer's slider values to the nearest integer."""
         var.set(int(round(float(value))))
 
     # ---------- Plots ----------
     def update_plots(self):
         if not self._ensure_layout(): return
+        self._clear_right_panel() # Clear panel for the plots
+
+        # Adjust figsize to give more room for subplots and colorbars
+        self.fig = plt.figure(figsize=(13.5, 9.0)) # Increased figure size
+        canvas = FigureCanvasTkAgg(self.fig, master=self.right_frame)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        self.right_panel_widget = canvas.get_tk_widget()
+
         d = self.current_layout_data
-        self.fig.clear()
-        (self.ax1, self.ax2), (self.ax3, self.ax4) = self.fig.subplots(2, 2)
-
-        self._draw_img_um(self.ax1, d["x"], d["y"], d["phase_ideal"], d["active_mask"], "Ideal Phase", cmap="twilight")
-
+        
+        # Use gridspec to control subplot spacing if needed, but tight_layout should handle this
+        (ax1, ax2), (ax3, ax4) = self.fig.subplots(2, 2)
+        
+        self._draw_img_um(ax1, d["x"], d["y"], d["phase_ideal"], d["active_mask"], "Ideal Phase", cmap="twilight")
         realized_fine = self._upsample_nearest(d["phase_realized"], self.REALIZED_UPSAMPLE)
         mask_fine = np.repeat(np.repeat(d["active_mask"], self.REALIZED_UPSAMPLE, 0), self.REALIZED_UPSAMPLE, 1)
-        self._draw_img_um(self.ax2, d["x"], d["y"], realized_fine, mask_fine, "Realized Phase (plug in data)", cmap="twilight")
-
+        self._draw_img_um(ax2, d["x"], d["y"], realized_fine, mask_fine, "Realized Phase (plug in data)", cmap="twilight")
         h_um = self._pillar_heights_um(d["phase_realized"])
-        self._draw_img_um(self.ax3, d["x"], d["y"], h_um, d["active_mask"], "Atom Height Map (µm)", cmap="viridis")
+        self._draw_img_um(ax3, d["x"], d["y"], h_um, d["active_mask"], "Atom Height Map (µm)", cmap="viridis")
+        d_um = np.where(d["diameters"] > 0, d["diameters"] * 1e-3, np.nan)
+        self._draw_img_um(ax4, d["x"], d["y"], d_um, d["active_mask"], "Atom Base Diameter (µm)", cmap="turbo")
 
-        d_um = np.where(d["diameters"] > 0, d["diameters"] * 1e-3, np.nan)  # nm -> µm
-        self._draw_img_um(self.ax4, d["x"], d["y"], d_um, d["active_mask"], "Atom Base Diameter (µm)", cmap="turbo")
-
-        self.fig.tight_layout(pad=2.0)
-        self.canvas.draw()
-        self.status.set("Plots updated successfully.")
+        self.fig.tight_layout(pad=3.0) # Increased padding
+        canvas.draw()
+        self.status.set("Analysis plots updated.")
         self._mark_plots_fresh()
 
-
     def _upsample_nearest(self, arr, factor):
-        if factor <= 1 or arr is None:
-            return arr
+        if factor <= 1 or arr is None: return arr
         return np.repeat(np.repeat(arr, factor, axis=0), factor, axis=1)
 
     def _draw_img_um(self, ax, x, y, data, mask, title, cmap="viridis"):
         arr = np.where(mask, data, np.nan)
         finite = np.isfinite(arr)
         vmin, vmax = (np.nanmin(arr), np.nanmax(arr)) if np.any(finite) else (0.0, 1.0)
-        if vmin == vmax:
-            vmin, vmax = vmin - 1e-6, vmax + 1e-6
-
-        im = ax.imshow(arr, extent=[x.min(), x.max(), y.min(), y.max()],
-                       origin="lower", cmap=cmap, vmin=vmin, vmax=vmax, interpolation="nearest")
+        if vmin == vmax: vmin, vmax = vmin - 1e-6, vmax + 1e-6
+        im = ax.imshow(arr, extent=[x.min(), x.max(), y.min(), y.max()], origin="lower", cmap=cmap, vmin=vmin, vmax=vmax, interpolation="nearest")
         ax.set_title(title, fontsize=10)
         ax.set_xlabel("x (µm)", fontsize=9)
         ax.set_ylabel("y (µm)", fontsize=9)
@@ -507,57 +501,45 @@ class PDK_App:
         cbar = self.fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         cbar.ax.tick_params(labelsize=8)
 
-    # ---------- Interactive vector viewer (view-culling) ----------
-    # ---------- Interactive vector viewer (view-culling) ----------
-    def _open_vector_layout_viewer(self):
+    # ---------- NEW: Integrated vector viewer ----------
+    def _display_vector_layout(self):
         if not self._ensure_layout(): return
+        self._clear_right_panel()
         data = self.current_layout_data
+        
+        container = ttk.Frame(self.right_frame)
+        container.pack(fill="both", expand=True)
 
-        # Use ttk.Toplevel to inherit the main window's theme
-        top = ttk.Toplevel(self.root)
-        top.title("Interactive Lens Layout — Vector Pillars")
-
-        # Get the theme's background color for Matplotlib
         theme_bg = ttk.Style().lookup('TFrame', 'background')
 
         # --- Top control panel ---
-        controls = ttk.Frame(top, padding=(10, 10))
+        controls = ttk.Frame(container, padding=(10, 5))
         controls.pack(side=tk.TOP, fill=tk.X)
-        controls.columnconfigure((1, 3), weight=1) # Make scales expandable
+        controls.columnconfigure((1, 4), weight=1)
 
-        # Stride slider
-        ttk.Label(controls, text="Decimation (stride):").grid(row=0, column=0, padx=(0, 5), sticky='w')
+        ttk.Label(controls, text="Decimation:").grid(row=0, column=0, padx=(0, 5), sticky='w')
         stride_var = tk.IntVar(value=2)
-        ttk.Scale(controls, from_=1, to=20, variable=stride_var,
-                command=lambda v: self._on_viewer_scale_change(v, stride_var)).grid(row=0, column=1, sticky='ew')
+        ttk.Scale(controls, from_=1, to=20, variable=stride_var, command=lambda v: self._on_viewer_scale_change(v, stride_var)).grid(row=0, column=1, sticky='ew')
         ttk.Label(controls, textvariable=stride_var, width=3).grid(row=0, column=2, padx=(5, 15))
 
-        # Min diameter slider
-        ttk.Label(controls, text="Min diameter (nm):").grid(row=0, column=3, padx=(0, 5), sticky='w')
+        ttk.Label(controls, text="Min ø (nm):").grid(row=0, column=3, padx=(0, 5), sticky='w')
         mind_var = tk.IntVar(value=20)
-        ttk.Scale(controls, from_=10, to=2000, variable=mind_var,
-                command=lambda v: self._on_viewer_scale_change(v, mind_var)).grid(row=0, column=4, sticky='ew')
+        ttk.Scale(controls, from_=10, to=2000, variable=mind_var, command=lambda v: self._on_viewer_scale_change(v, mind_var)).grid(row=0, column=4, sticky='ew')
         ttk.Label(controls, textvariable=mind_var, width=5).grid(row=0, column=5, padx=5)
-
-        count_lbl = ttk.Label(controls, text="", anchor=E)
+        count_lbl = ttk.Label(controls, text="", anchor='e')
         count_lbl.grid(row=1, column=0, columnspan=6, sticky='ew', pady=(5,0))
 
         # --- Matplotlib Figure and Toolbar ---
-        fig_frame = ttk.Frame(top)
-        fig_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0,10))
-
         fig = plt.figure(figsize=(8.3, 8.3), facecolor=theme_bg)
-        canvas = FigureCanvasTkAgg(fig, master=fig_frame)
+        canvas = FigureCanvasTkAgg(fig, master=container)
         canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
-        toolbar = NavigationToolbar2Tk(canvas, fig_frame, pack_toolbar=False)
+        toolbar = NavigationToolbar2Tk(canvas, container, pack_toolbar=False)
         toolbar.update()
         toolbar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.right_panel_widget = container
 
-        ax = fig.add_subplot(111)
-        ax.set_facecolor(theme_bg)
-        ax.set_xlabel("X (μm)")
-        ax.set_ylabel("Y (μm)")
+        ax = fig.add_subplot(111, facecolor=theme_bg)
+        ax.set_xlabel("X (μm)"); ax.set_ylabel("Y (μm)")
         ax.set_title("Vector Pillar Layout")
 
         x, y, dnm, mask = data["x"], data["y"], data["diameters"], data["diameters"] > 0.0
@@ -567,15 +549,13 @@ class PDK_App:
         def schedule_redraw(*_):
             nonlocal after_id
             if after_id is not None:
-                try: top.after_cancel(after_id)
+                try: self.root.after_cancel(after_id)
                 except Exception: pass
-            after_id = top.after(60, draw_visible)
+            after_id = self.root.after(60, draw_visible)
 
         def draw_visible():
-            x0, x1 = ax.get_xlim()
-            y0, y1 = ax.get_ylim()
-            s = max(1, int(stride_var.get()))
-            min_nm = max(1, int(mind_var.get()))
+            x0, x1 = ax.get_xlim(); y0, y1 = ax.get_ylim()
+            s = max(1, int(stride_var.get())); min_nm = max(1, int(mind_var.get()))
             xs, ys, ds, mk = x[::s, ::s], y[::s, ::s], dnm[::s, ::s], mask[::s, ::s]
             in_view = mk & (ds >= min_nm) & (xs >= x0) & (xs <= x1) & (ys >= y0) & (ys <= y1)
 
@@ -584,10 +564,8 @@ class PDK_App:
             ax.set_xlabel("X (μm)"); ax.set_ylabel("Y (μm)")
             ax.set_title("Vector Pillar Layout")
             ax.set_xlim(x0, x1); ax.set_ylim(y0, y1)
-
-            outline = Circle((0.0, 0.0), R, fill=False, lw=1.0, ec="white", alpha=0.7)
-            ax.add_patch(outline)
-
+            ax.add_patch(Circle((0.0, 0.0), R, fill=False, lw=1.0, ec="white", alpha=0.7))
+            
             count = 0
             shape = self.config.get("shape", "frustum")
             if np.any(in_view):
@@ -595,18 +573,15 @@ class PDK_App:
                 radii_um = 0.5 * ds_v * 1e-3
                 if shape == "frustum":
                     N = int(self.config.get("sides", 10))
-                    patches = [RegularPolygon((float(cx), float(cy)), N, radius=float(r))
-                            for cx, cy, r in zip(xs_v, ys_v, radii_um)]
+                    patches = [RegularPolygon((float(cx), float(cy)), N, radius=float(r)) for cx, cy, r in zip(xs_v, ys_v, radii_um)]
                 else:
-                    patches = [Circle((float(cx), float(cy)), float(r))
-                            for cx, cy, r in zip(xs_v, ys_v, radii_um)]
+                    patches = [Circle((float(cx), float(cy)), float(r)) for cx, cy, r in zip(xs_v, ys_v, radii_um)]
                 coll = PatchCollection(patches, facecolor="#ff5470", edgecolor="none", alpha=0.85)
                 ax.add_collection(coll)
                 count = len(patches)
             else:
-                ax.text(0.5, 0.5, "No pillars in view\n(zoom/pan or adjust controls)",
-                        color="w", ha="center", va="center", transform=ax.transAxes, alpha=0.8)
-
+                ax.text(0.5, 0.5, "No pillars in view\n(zoom/pan or adjust controls)", color="w", ha="center", va="center", transform=ax.transAxes, alpha=0.8)
+            
             count_lbl.config(text=f"Pillars shown: {count:,} (decimation {s}x, min ø {min_nm} nm)")
             canvas.draw_idle()
 
@@ -614,42 +589,131 @@ class PDK_App:
         ax.callbacks.connect('ylim_changed', schedule_redraw)
         canvas.mpl_connect('scroll_event', schedule_redraw)
         canvas.mpl_connect('button_release_event', schedule_redraw)
-
-        # Set initial view to the full lens diameter with a 5% margin
-        margin = 1.05
-        ax.set_xlim(-R * margin, R * margin)
-        ax.set_ylim(-R * margin, R * margin)
-
-        # Manually call the redraw function once to populate the initial view
+        ax.set_xlim(-R * 1.05, R * 1.05); ax.set_ylim(-R * 1.05, R * 1.05)
         draw_visible()
+        self.status.set("Interactive layout loaded.")
+        
+    # ---------- FINAL: Static, High-Detail 3D Image Rendering ----------
+    def _display_3d_view(self):
+        # Required libraries for this new method
+        import tempfile
+        from PIL import Image, ImageTk
+
+        if not self._ensure_layout(): return
+        self._clear_right_panel()
+        data = self.current_layout_data
+        
+        # This frame will hold the final image label
+        container = ttk.Frame(self.right_frame)
+        container.pack(fill="both", expand=True)
+
+        self.status.set("Generating 3D image, this may take a moment...")
+        self.root.update_idletasks()
+
+        # --- Step 1: Generate the plot in memory (off-screen) ---
+        fig = plt.figure(figsize=(14, 10), dpi=150) # Increased DPI for a sharper image
+        ax_main = fig.add_subplot(111, projection='3d')
+        ax_inset = fig.add_axes([0.62, 0.62, 0.3, 0.3], projection='3d')
+        
+        def create_pillar_polygons(cx, cy, h_um, r_base_um, N, is_frustum):
+            if r_base_um <= 0: return []
+            taper_ratio = 0.7 if is_frustum else 1.0
+            r_top_um = r_base_um * taper_ratio
+            theta = np.linspace(0, 2 * np.pi, N, endpoint=False)
+            x_base = cx + r_base_um * np.cos(theta); y_base = cy + r_base_um * np.sin(theta)
+            base_polygon = list(zip(x_base, y_base, np.zeros(N)))
+            x_top = cx + r_top_um * np.cos(theta); y_top = cy + r_top_um * np.sin(theta)
+            top_polygon = list(zip(x_top, y_top, np.full(N, h_um)))
+            polygons = [base_polygon, top_polygon]
+            for i in range(N):
+                next_i = (i + 1) % N
+                side_face = [base_polygon[i], base_polygon[next_i], top_polygon[next_i], top_polygon[i]]
+                polygons.append(side_face)
+            return polygons
+        s = 1; min_nm = 0
+        x_strided = data["x"][::s, ::s]; y_strided = data["y"][::s, ::s]
+        d_nm_strided = data["diameters"][::s, ::s]; mask_strided = data["active_mask"][::s, ::s]
+        final_mask = (d_nm_strided >= min_nm) & mask_strided
+        active_x = x_strided[final_mask].flatten(); active_y = y_strided[final_mask].flatten()
+        active_diameters_nm = d_nm_strided[final_mask].flatten()
+        FIXED_HEIGHT = 25.0
+        active_h_um = np.full_like(active_x, FIXED_HEIGHT)
+        count = len(active_x)
+        all_polygons = []; is_frustum = self.config["shape"] == "frustum"; num_sides = self.config.get("sides", 10)
+        for i in range(count):
+            r_base_um = active_diameters_nm[i] * 0.5 * 1e-3
+            polys = create_pillar_polygons(active_x[i], active_y[i], active_h_um[i], r_base_um, num_sides, is_frustum)
+            all_polygons.extend(polys)
+        if all_polygons:
+            mesh = Poly3DCollection(all_polygons, facecolor='#0d9488', edgecolor='#084f48', linewidth=0.2, alpha=0.9)
+            ax_main.add_collection3d(mesh)
+        lens_radius_um = data["lens_radius_um"]; inset_size = lens_radius_um * 0.2
+        inset_center_x = lens_radius_um * 0.5; inset_center_y = lens_radius_um * 0.5
+        inset_mask = ((active_x >= inset_center_x - inset_size / 2) & (active_x <= inset_center_x + inset_size / 2) & (active_y >= inset_center_y - inset_size / 2) & (active_y <= inset_center_y + inset_size / 2))
+        inset_polygons = []
+        for i in np.where(inset_mask)[0]:
+            r_base_um = active_diameters_nm[i] * 0.5 * 1e-3
+            polys = create_pillar_polygons(active_x[i], active_y[i], active_h_um[i], r_base_um, num_sides, is_frustum)
+            inset_polygons.extend(polys)
+        if inset_polygons:
+            inset_mesh = Poly3DCollection(inset_polygons, facecolor='#0d9488', edgecolor='#084f48', linewidth=0.5, alpha=0.9)
+            ax_inset.add_collection3d(inset_mesh)
+        ax_main.axis('off'); ax_main.view_init(elev=40, azim=-60)
+        if count > 0:
+            x_min, x_max = data["x"].min(), data["x"].max(); y_min, y_max = data["y"].min(), data["y"].max()
+            ax_main.set_xlim(x_min, x_max); ax_main.set_ylim(y_min, y_max)
+            ax_main.set_zlim(0, FIXED_HEIGHT * 1.2)
+            ax_main.set_box_aspect([(x_max - x_min), (y_max - y_min), (FIXED_HEIGHT * 1.2)])
+        rx, ry = inset_center_x, inset_center_y; rs = inset_size / 2
+        ax_main.plot([rx-rs, rx+rs, rx+rs, rx-rs, rx-rs], [ry-rs, ry-rs, ry+rs, ry+rs, ry-rs], zs=0, color='red', linewidth=2, zorder=10)
+        ax_inset.axis('off'); ax_inset.view_init(elev=20, azim=-45)
+        ax_inset.set_xlim(rx-rs, rx+rs); ax_inset.set_ylim(ry-rs, ry+rs)
+        ax_inset.set_zlim(0, FIXED_HEIGHT * 1.2)
+        ax_inset.set_box_aspect([inset_size, inset_size, FIXED_HEIGHT * 1.2])
+
+        # --- Step 2: Save the generated figure to a temporary file ---
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpfile:
+            fig.savefig(tmpfile.name, bbox_inches='tight', pad_inches=0.1, facecolor=fig.get_facecolor())
+            temp_image_path = tmpfile.name
+        
+        # Close the figure to free up memory
+        plt.close(fig)
+
+        # --- Step 3: Load the image file and display it in a Tkinter Label ---
+        try:
+            img = Image.open(temp_image_path)
+            photo = ImageTk.PhotoImage(img)
+            
+            image_label = ttk.Label(container, image=photo)
+            # Keep a reference to the image to prevent it from being garbage collected
+            image_label.image = photo 
+            image_label.pack(fill="both", expand=True)
+
+            self.right_panel_widget = image_label
+            self.status.set(f"Static 3D image with {count:,} pillars displayed.")
+        
+        except Exception as e:
+            self.status.set(f"Error loading 3D image: {e}")
+            
     # ---------- Estimate writing time ----------
     def _estimate_time(self):
         if not self._ensure_layout(): return
         d = self.current_layout_data
-        # average realized phase as a fraction of 2π, then infer typical height
         mean_wrapped = np.nanmean(d["phase_realized"])
         h_um = (mean_wrapped / (2*np.pi)) * self._h_2pi_um()
-
         d_nm = d["diameters"]; mask = d_nm > 0
         area_pillars_um2 = (np.pi / 4.0) * np.sum((d_nm[mask] ** 2)) * 1e-6
-
         hatch_um = 0.5; speed_ums = 5000; layer_thickness_um = 0.5
         layers = max(1, int(np.ceil(max(1.0, h_um) / layer_thickness_um)))
         time_s = layers * (area_pillars_um2 / (speed_ums * hatch_um))
         hrs = time_s / 3600.0
-
-        self.status.set(
-            f"Estimated writing time ≈ {hrs:.2f} h • height≈{h_um:.1f} µm • fill≈{area_pillars_um2/1e6:.3f} mm² "
-            f"(realistic defaults; no fab info)."
-        )
+        self.status.set(f"Estimated writing time ≈ {hrs:.2f} h • height≈{h_um:.1f} µm • fill≈{area_pillars_um2/1e6:.3f} mm².")
 
     # ---------- CSV ----------
     def generate_csv_file(self):
         if not self._ensure_layout(): return
         data = self.current_layout_data
-        path = filedialog.asksaveasfilename(defaultextension=".csv",
-                    filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-                    title="Save Metalens Layout")
+        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files", "*.csv"), ("All files", "*.*")], title="Save Metalens Layout")
         if not path: return
         header = f"x_um,y_um,diameter_nm,{data['fab_lut']['param_name'].replace(' ', '_')}"
         x_flat = data["x"].flatten(); y_flat = data["y"].flatten()
@@ -663,37 +727,26 @@ class PDK_App:
     def export_gdsii(self):
         if not self._ensure_layout(): return
         data = self.current_layout_data
-        try:
-            import gdstk
+        try: import gdstk
         except Exception:
             self.status.set("GDS export requires 'gdstk'. Install with: pip install gdstk")
             return
-
-        path = filedialog.asksaveasfilename(defaultextension=".gds",
-                    filetypes=[("GDSII files", "*.gds"), ("All files", "*.*")],
-                    title="Save GDSII (KLayout)")
+        path = filedialog.asksaveasfilename(defaultextension=".gds", filetypes=[("GDSII files", "*.gds"), ("All files", "*.*")], title="Save GDSII (KLayout)")
         if not path: return
-
         x = data["x"]; y = data["y"]; dnm = data["diameters"]; mask = dnm > 0.0
         total = int(mask.sum())
         if total == 0:
             self.status.set("Nothing to write: empty layout."); return
-
-        target = 150_000
-        stride = max(1, int(np.ceil(np.sqrt(total / target))))
-        min_d_nm = 20.0
-
+        stride = max(1, int(np.ceil(np.sqrt(total / 150_000))))
         lib = gdstk.Library(unit=1e-6, precision=1e-9)
         cell = lib.new_cell("METALENS")
-
         pitch_um = float(abs(x[0,1] - x[0,0])) if x.shape[1] > 1 else 1.0
-
         h, w = dnm.shape; count = 0; shape = self.config.get("shape", "frustum")
         for i in range(0, h, stride):
             for j in range(0, w, stride):
                 if not mask[i, j]: continue
                 d_nm = float(dnm[i, j])
-                if d_nm < min_d_nm: continue
+                if d_nm < 20.0: continue
                 r_um = 0.5 * d_nm * 1e-3; cx = float(x[i, j]); cy = float(y[i, j])
                 if shape == "frustum":
                     N = int(self.config.get("sides", 10))
@@ -701,242 +754,18 @@ class PDK_App:
                 else:
                     circ = gdstk.ellipse((cx, cy), r_um, tolerance=0.02, layer=1, datatype=0); cell.add(circ)
                 count += 1
-
         lens_radius_um = (self.config["lens_diameter"] / 2) * 1000.0
         ring_w_um = max(1.0, 0.002 * lens_radius_um)
-        outline = gdstk.ellipse((0.0, 0.0), lens_radius_um,
-                                inner_radius=lens_radius_um - ring_w_um,
-                                tolerance=0.1, layer=100, datatype=0)
+        outline = gdstk.ellipse((0.0, 0.0), lens_radius_um, inner_radius=lens_radius_um - ring_w_um, tolerance=0.1, layer=100, datatype=0)
         cell.add(outline)
-
-        try:
-            lib.write_gds(path)
-        except Exception as e:
-            self.status.set(f"GDS write failed: {e}"); return
-
-        self.status.set(
-            f"GDS saved: {path.split('/')[-1]}  |  pillars: ~{count:,}  |  pitch≈{pitch_um:.3f} μm  |  stride={stride}"
-        )
-
-    # ---------- 3D CAD (Plotly/WebGL) — FULL LENS, minimal controls ----------
-    def _open_3d_cad_plotly_full(self):
-        """Full-lens 3D with capped frustums colored by realized phase.
-        Opens: (1) interactive single scene, (2) twin-view (overview + close-up)."""
-        if not self._ensure_layout():
-            return
-        try:
-            import tempfile
-            import plotly.graph_objects as go
-            from plotly.offline import plot as plotly_plot
-            from plotly.subplots import make_subplots
-            from matplotlib import colors as mpl_colors
-        except Exception:
-            self.status.set("3D CAD view needs Plotly + Matplotlib. Install: pip install plotly matplotlib")
-            return
-
-        d = self.current_layout_data
-        x = d["x"]; y = d["y"]; dnm = d["diameters"]; phase = d["phase_realized"]
-        mask = dnm > 0.0
-        if not np.any(mask):
-            self.status.set("No active pillars to render."); return
-
-        R = (self.config["lens_diameter"] / 2.0) * 1000.0
-        H2pi = self._h_2pi_um()
-        # height from realized wrapped phase (0..2π) → 0..H2pi
-        h_um = (phase / (2.0 * np.pi)) * H2pi
-
-        # --- tiny Tk panel (stride + min diameter) ---
-        top = tk.Toplevel(self.root); top.title("3D CAD (Plotly/WebGL) — full lens")
-
-        row = tk.Frame(top); row.pack(side=tk.TOP, fill=tk.X)
-        tk.Label(row, text="Stride:", font=("Inter", 12)).pack(side=tk.LEFT, padx=(8, 4))
-        stride_var = tk.IntVar(value=2)
-        tk.Scale(row, from_=1, to=40, orient="horizontal", variable=stride_var,
-                showvalue=True, length=240).pack(side=tk.LEFT, padx=(0, 12))
-
-        tk.Label(row, text="Min d (nm):", font=("Inter", 12)).pack(side=tk.LEFT)
-        ds_all = dnm[mask].astype(float); dmax = float(np.nanmax(ds_all))
-        mind_var = tk.DoubleVar(value=20.0)
-        tk.Scale(row, from_=10.0, to=max(100.0, 1.2 * dmax), resolution=1.0,
-                orient="horizontal", variable=mind_var, showvalue=True,
-                length=260).pack(side=tk.LEFT, padx=(0, 12))
-
-        btns = tk.Frame(top); btns.pack(side=tk.TOP, fill=tk.X, pady=(6, 6))
-        tk.Button(btns, text="Render", bg="#d97706", fg="white",
-                font=("Inter", 12, "bold"),
-                command=lambda: render()).pack(side=tk.LEFT, padx=8)
-        status_lbl = tk.Label(btns, text="", font=("Inter", 12)); status_lbl.pack(side=tk.LEFT, padx=8)
-
-        # --- colormap helper (gentle hues) ---
-        cmap = mpl.colormaps.get_cmap("twilight_shifted")
-        def scalar_to_hex(u01):
-            rgba = cmap(np.clip(u01, 0.0, 1.0))
-            return mpl_colors.to_hex(rgba, keep_alpha=False)
-
-        # --- mesh builder with caps + per-vertex color ---
-        def build_frustums(cx, cy, hh, d_nm, phi):
-            Vx, Vy, Vz, I, J, K, VC = [], [], [], [], [], [], []
-            vert_ofs = 0
-
-            rb = 0.5 * (d_nm * 1e-3)                  # base radius (µm)
-            taper = 0.55 if self.config.get("shape", "frustum") == "frustum" else 1.0
-            rt = rb * taper                           # top radius (µm)
-
-            sides = int(max(3, self.config.get("sides", 10)))
-            ang = np.linspace(0, 2*np.pi, sides, endpoint=False)
-            ca, sa = np.cos(ang), np.sin(ang)
-
-            col_u = (phi % (2*np.pi)) / (2*np.pi)
-            col_hex = [scalar_to_hex(u) for u in col_u]
-
-            def add_tri(a, b, c):
-                I.append(a); J.append(b); K.append(c)
-
-            for Xc, Yc, H, RB, RT, c in zip(cx, cy, hh, rb, rt, col_hex):
-                xb = Xc + RB * ca; yb = Yc + RB * sa; zb = np.zeros_like(xb)
-                xt = Xc + RT * ca; yt = Yc + RT * sa; zt = np.full_like(xt, H)
-
-                Vx.extend(xb); Vy.extend(yb); Vz.extend(zb); VC.extend([c] * len(xb))  # bottom ring
-                Vx.extend(xt); Vy.extend(yt); Vz.extend(zt); VC.extend([c] * len(xt))  # top ring
-                base = vert_ofs; topb = base + sides
-
-                # side walls
-                for k in range(sides):
-                    v0 = base + k
-                    v1 = base + ((k + 1) % sides)
-                    v2 = topb + k
-                    v3 = topb + ((k + 1) % sides)
-                    add_tri(v0, v1, v2); add_tri(v1, v3, v2)
-
-                # top cap
-                ct = base + 2 * sides
-                Vx.append(Xc); Vy.append(Yc); Vz.append(H); VC.append(c)
-                for k in range(sides):
-                    add_tri(ct, topb + k, topb + ((k + 1) % sides))
-
-                # bottom cap
-                cb = ct + 1
-                Vx.append(Xc); Vy.append(Yc); Vz.append(0.0); VC.append(c)
-                for k in range(sides):
-                    add_tri(cb, base + ((k + 1) % sides), base + k)
-
-                vert_ofs = cb + 1
-
-            return (np.array(Vx), np.array(Vy), np.array(Vz),
-                    np.array(I), np.array(J), np.array(K),
-                    np.array(VC))
-
-        # --- deterministic sub-sampling over full lens (triangle budget) ---
-        def select_points():
-            s0 = int(max(1, stride_var.get()))
-            xs = x[::s0, ::s0]; ys = y[::s0, ::s0]
-            ds = dnm[::s0, ::s0]; hs = h_um[::s0, ::s0]; ph = phase[::s0, ::s0]
-            rr = np.sqrt(xs**2 + ys**2)
-            mk = (ds >= float(mind_var.get())) & (rr <= R)
-
-            MAX_TRIANGLES = 500_000
-            sides_here = int(max(3, self.config.get("sides", 10)))
-            max_by_tri = max(1000, MAX_TRIANGLES // (4 * sides_here))
-            MAX_PILLARS = min(15000, max_by_tri)
-
-            n = int(np.count_nonzero(mk))
-            if n > MAX_PILLARS:
-                extra = int(np.ceil(np.sqrt(n / MAX_PILLARS)))
-                Iidx, Jidx = np.indices(mk.shape)
-                mk &= (Iidx % extra == 0) & (Jidx % extra == 0)
-                n = int(np.count_nonzero(mk))
-            return xs[mk], ys[mk], ds[mk].astype(float), hs[mk].astype(float), ph[mk].astype(float), n
-
-        # --- main render (opens BOTH windows) ---
-        def render():
-            status_lbl.config(text="Rendering…"); top.update_idletasks()
-            xs, ys, ds, hs, phs, n = select_points()
-            if n == 0:
-                status_lbl.config(text="Nothing to render (lower min d or stride)."); return
-
-            Vx, Vy, Vz, I, J, K, VC = build_frustums(xs, ys, hs, ds, phs)
-
-            def mesh_trace():
-                return go.Mesh3d(
-                    x=Vx, y=Vy, z=Vz, i=I, j=J, k=K,
-                    vertexcolor=VC, opacity=1.0, showscale=False, hoverinfo="skip",
-                    lighting=dict(ambient=0.45, diffuse=0.7, specular=0.9, roughness=0.18, fresnel=0.2),
-                    lightposition=dict(x=0, y=0, z=2000)
-                )
-
-            th = np.linspace(0, 2*np.pi, 512)
-            def ring_trace():
-                return go.Scatter3d(x=R*np.cos(th), y=R*np.sin(th), z=np.zeros_like(th),
-                                    mode="lines", line=dict(color="rgba(255,255,255,0.6)", width=2),
-                                    showlegend=False, hoverinfo="skip")
-
-            # 1) Interactive single scene (as before)
-            fig = go.Figure([mesh_trace(), ring_trace()])
-            fig.update_layout(
-                scene=dict(
-                    xaxis_title="X (μm)", yaxis_title="Y (μm)", zaxis_title="Height (μm)",
-                    aspectmode="data",
-                    xaxis=dict(backgroundcolor="#111827", showgrid=False, zeroline=False),
-                    yaxis=dict(backgroundcolor="#111827", showgrid=False, zeroline=False),
-                    zaxis=dict(backgroundcolor="#111827", showgrid=True,  zeroline=False),
-                ),
-                template="plotly_dark",
-                margin=dict(l=0, r=0, t=40, b=0),
-                scene_camera=dict(eye=dict(x=0.9, y=1.1, z=1.25))  # slightly oblique by default
-            )
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".html"); tmp.close()
-            plotly_plot(fig, filename=tmp.name, auto_open=True)
-
-            # 2) Two-view snapshot: overview + angled close-up (separate HTML)
-            fig2 = make_subplots(rows=1, cols=2,
-                                specs=[[{"type": "scene"}, {"type": "scene"}]],
-                                subplot_titles=("Overview (oblique)", "Close-up at rim"))
-
-            # left scene (overview)
-            fig2.add_trace(mesh_trace(), row=1, col=1)
-            fig2.add_trace(ring_trace(), row=1, col=1)
-
-            # right scene (close-up)
-            fig2.add_trace(mesh_trace(), row=1, col=2)
-            fig2.add_trace(ring_trace(), row=1, col=2)
-
-            # common scene style
-            base_scene = dict(
-                xaxis_title="X (μm)", yaxis_title="Y (μm)", zaxis_title="Height (μm)",
-                aspectmode="data",
-                xaxis=dict(backgroundcolor="#111827", showgrid=False, zeroline=False),
-                yaxis=dict(backgroundcolor="#111827", showgrid=False, zeroline=False),
-                zaxis=dict(backgroundcolor="#111827", showgrid=True,  zeroline=False),
-            )
-
-            # close-up window near rim (45° sector)
-            cx = 0.25 * R / np.sqrt(2)
-            cy = 0.25 * R / np.sqrt(2)
-            w  = 0.22 * R
-
-            fig2.update_layout(
-                template="plotly_dark",
-                margin=dict(l=10, r=10, t=55, b=10),
-                scene=base_scene | dict(camera=dict(eye=dict(x=1.6, y=1.6, z=1.1))),
-                scene2=(base_scene | dict(
-                    xaxis=dict(range=[cx - w, cx + w], backgroundcolor="#111827", showgrid=False, zeroline=False),
-                    yaxis=dict(range=[cy - w, cy + w], backgroundcolor="#111827", showgrid=False, zeroline=False),
-                    zaxis=dict(range=[0, H2pi], backgroundcolor="#111827", showgrid=True, zeroline=False),
-                    aspectmode="auto",
-                    camera=dict(eye=dict(x=2.2, y=1.8, z=1.4))  # angled close-up
-                ))
-            )
-            tmp2 = tempfile.NamedTemporaryFile(delete=False, suffix=".html"); tmp2.close()
-            plotly_plot(fig2, filename=tmp2.name, auto_open=True)
-
-            status_lbl.config(text=f"Opened interactive view + two-view snapshot (pillars: {n:,}).")
-
-        # initial render
-        render()
+        try: lib.write_gds(path)
+        except Exception as e: self.status.set(f"GDS write failed: {e}"); return
+        self.status.set(f"GDS saved: {path.split('/')[-1]} | pillars: ~{count:,} | stride={stride}")
 
 # ----------------------------- Main -----------------------------
 if __name__ == "__main__":
-    # Use ttkbootstrap Window for automatic theming
     root = ttk.Window(themename="superhero")
+    root.geometry("1920x1080+0+0") # Set size to 1920x1080 and position at top-left
+    root.resizable(True, True)
     app = PDK_App(root)
     root.mainloop()
